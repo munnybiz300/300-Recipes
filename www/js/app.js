@@ -14,9 +14,14 @@ import { t, getLang, setLang, locale } from './i18n.js';
 const app = document.getElementById('app');
 
 // ---------- app state ----------
-let recipes = [];
-const SORTS = ['new', 'old', 'az', 'za'];
+let recipes = [];   // recipes in use (not in the recycle bin)
+let binList = [];   // recipes in the recycle bin
+const SORTS = ['new', 'old', 'az', 'za', 'rated'];
+const CSORTS = ['az', 'za', 'new', 'old', 'count'];
+const BIN_DAYS = 30;
+const DAY = 864e5;
 const homeState = { query: '', tags: [], fav: false, sort: SORTS.includes(localStorage.getItem('sort')) ? localStorage.getItem('sort') : 'new' };
+let collSort = CSORTS.includes(localStorage.getItem('csort')) ? localStorage.getItem('csort') : 'az';
 const scaleState = new Map(); // recipeId -> { factor, note }
 const tabState = new Map();   // recipeId -> tab name
 let pendingDraft = null;      // imported recipe waiting in the editor
@@ -24,7 +29,62 @@ let backGuard = null;         // set by the editor: asks before leaving with uns
 
 setParserLang(getLang());
 
-async function refresh() { recipes = await db.allRecipes(); }
+async function refresh() {
+  const all = await db.allRecipes();
+  recipes = all.filter((r) => !r.deleted);
+  binList = all.filter((r) => r.deleted).sort((a, b) => b.deleted - a.deleted);
+}
+
+// Recipes stay in the recycle bin for 30 days, then they're deleted for good
+async function purgeBin() {
+  const cutoff = Date.now() - BIN_DAYS * DAY;
+  for (const r of await db.allRecipes()) {
+    if (r.deleted && r.deleted < cutoff) { await db.deleteRecipe(r.id); localStorage.removeItem('checks:' + r.id); }
+  }
+}
+
+// ---------- ratings ----------
+// The rating is the average of the cook log entries that have stars.
+// "Made" counts every entry, rated or not.
+function ratingInfo(r) {
+  const cooks = r.cooks || [];
+  const rated = cooks.filter((c) => c.rating > 0);
+  const avg = rated.length ? rated.reduce((a, c) => a + c.rating, 0) / rated.length : null;
+  return { avg, rated: rated.length, made: cooks.length };
+}
+const fmtAvg = (a) => (Math.round(a * 10) / 10).toLocaleString(locale(), { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+
+// Read-only stars; partly filled stars show averages like 4.3
+function starsView(value, cls = '') {
+  const wrap = h('span', { class: 'stars ' + cls, 'aria-label': value ? fmtAvg(value) + ' / 5' : '' });
+  for (let i = 1; i <= 5; i++) {
+    const fill = Math.max(0, Math.min(1, (value || 0) - (i - 1)));
+    wrap.append(h('span', { class: 'star' }, icon('star'), h('span', { class: 'fill', style: { width: fill * 100 + '%' } }, icon('star'))));
+  }
+  return wrap;
+}
+
+// Tappable half-star rating. Tap the left half of a star for a half star.
+// Tapping the current rating again clears it.
+function starInput(value, onChange) {
+  let v = value || 0;
+  const el = h('div', { class: 'star-input' });
+  function draw() {
+    el.innerHTML = '';
+    const row = h('div', { class: 'stars lg' });
+    for (let i = 1; i <= 5; i++) {
+      const fill = Math.max(0, Math.min(1, v - (i - 1)));
+      row.append(h('span', { class: 'star' }, icon('star'), h('span', { class: 'fill', style: { width: fill * 100 + '%' } }, icon('star')),
+        h('button', { type: 'button', class: 'half l', 'aria-label': String(i - 0.5), onclick: () => set(i - 0.5) }),
+        h('button', { type: 'button', class: 'half r', 'aria-label': String(i), onclick: () => set(i) })));
+    }
+    el.append(row, h('span', { class: 'star-val' }, v ? fmtAvg(v) : t('notRated')),
+      v ? h('button', { type: 'button', class: 'text-btn', onclick: () => set(v) }, t('clear')) : null);
+  }
+  function set(x) { v = v === x ? 0 : x; draw(); onChange(v); }
+  draw();
+  return el;
+}
 
 function allTags() {
   const counts = new Map();
@@ -45,6 +105,8 @@ async function route() {
   window.scrollTo(0, 0);
   const [, page, id] = hash.split('/');
   if (!page) return renderHome();
+  if (page === 'c') return id ? renderCollection(decodeURIComponent(id)) : renderCollections();
+  if (page === 'bin') return renderBin();
   if (page === 'r' && id) return renderDetail(id);
   if (page === 'edit') return renderEditor(id);
   if (page === 'new') return renderEditor(null);
@@ -54,6 +116,7 @@ async function route() {
 
 function screen(...children) {
   app.innerHTML = '';
+  document.body.classList.remove('has-nav');
   const s = h('div', { class: 'screen' }, ...children);
   app.append(s);
   return s;
@@ -66,6 +129,7 @@ async function handleBack() {
   if (hasOverlay()) { history.back(); return; }
   const hash = location.hash || '#/';
   if (hash === '#/' || hash === '#') { leaveApp(); return; }
+  if (hash === '#/c') { location.replace('#/'); return; } // Collections → Recipes, then out
   if (backGuard && !(await backGuard())) return;
   history.back();
 }
@@ -89,6 +153,14 @@ function matches(r, q, tagFilter) {
 
 function sortList(list) {
   const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', locale(), { sensitivity: 'base' });
+  if (homeState.sort === 'rated') {
+    // Highest average first; recipes without ratings go last
+    return list.sort((a, b) => {
+      const x = ratingInfo(a), y = ratingInfo(b);
+      if ((x.avg == null) !== (y.avg == null)) return x.avg == null ? 1 : -1;
+      return (y.avg || 0) - (x.avg || 0) || y.made - x.made || byTitle(a, b);
+    });
+  }
   if (homeState.sort === 'az') return list.sort(byTitle);
   if (homeState.sort === 'za') return list.sort((a, b) => byTitle(b, a));
   if (homeState.sort === 'old') return list.sort((a, b) => a.created - b.created);
@@ -144,7 +216,7 @@ function renderHome() {
     sortRow.innerHTML = '';
     sortRow.append(
       h('span', {}, homeState.query || homeState.tags.length || homeState.fav ? t('matches', list.length) : ''),
-      h('button', { class: 'sort-btn', onclick: () => openSortSheet(update) }, t('sort_' + homeState.sort), icon('chevron', 'sm')));
+      h('button', { class: 'sort-btn', onclick: () => openRecipeSort(update) }, t('sort_' + homeState.sort), icon('chevron', 'sm')));
     sortRow.classList.toggle('hidden', !recipes.length);
 
     grid.innerHTML = '';
@@ -164,25 +236,149 @@ function renderHome() {
     for (const r of list) grid.append(card(r));
   }
 
-  s.append(head, search, chips, sortRow, grid, empty,
-    h('button', { class: 'fab', onclick: openAddSheet }, icon('plus'), t('addRecipe')));
+  s.append(head, search, chips, sortRow, grid, empty);
+  // Fixed buttons live outside the animated screen so they don't jump on arrival
+  app.append(h('button', { class: 'fab', onclick: openAddSheet }, icon('plus'), t('addRecipe')), bottomNav('recipes'));
   update();
 }
 
-function openSortSheet(update) {
-  openSheet((box, close) => {
+// Bottom bar: Recipes on the left, Collections on the right
+function bottomNav(active) {
+  document.body.classList.add('has-nav');
+  const item = (key, hash, ic, label) => h('button', {
+    class: active === key ? 'on' : '', 'aria-current': active === key ? 'page' : null,
+    onclick: () => { if (active !== key) location.replace(hash); else window.scrollTo({ top: 0, behavior: 'smooth' }); },
+  }, h('span', { class: 'pill' }, icon(ic)), label);
+  return h('nav', { class: 'bottom-nav' },
+    item('recipes', '#/', 'pot', t('recipes')),
+    item('collections', '#/c', 'collections', t('collections')));
+}
+
+function sortSheet(keys, current, labelKey) {
+  return openSheet((box, close) => {
     box.append(h('h3', { style: { marginBottom: '14px' } }, t('sortBy')));
-    for (const k of SORTS) {
-      const on = homeState.sort === k;
+    for (const k of keys) {
+      const on = current === k;
       box.append(h('button', { class: 'option sort-opt' + (on ? ' on' : ''), onclick: () => close(k) },
-        h('b', {}, t('sort_' + k)), on ? icon('check') : null));
+        h('b', {}, t(labelKey + k)), on ? icon('check') : null));
     }
-  }).then((k) => {
+  });
+}
+
+function openRecipeSort(update) {
+  sortSheet(SORTS, homeState.sort, 'sort_').then((k) => {
     if (!k) return;
     homeState.sort = k;
     localStorage.setItem('sort', k);
     update();
   });
+}
+
+// =====================================================================
+// COLLECTIONS (one per tag, plus Favorites and Untagged)
+// =====================================================================
+
+const FAV_KEY = '~fav', UNTAGGED_KEY = '~untagged';
+
+function collections() {
+  const map = new Map();
+  for (const r of recipes) for (const tg of r.tags || []) {
+    const k = tg.toLowerCase();
+    const c = map.get(k) || { key: tg, name: tg, list: [] };
+    c.list.push(r); map.set(k, c);
+  }
+  return [...map.values()];
+}
+
+function collectionList(key) {
+  if (key === FAV_KEY) return { name: t('favorites'), list: recipes.filter((r) => r.favorite) };
+  if (key === UNTAGGED_KEY) return { name: t('untagged'), list: recipes.filter((r) => !(r.tags || []).length) };
+  const k = key.toLowerCase();
+  const list = recipes.filter((r) => (r.tags || []).some((x) => x.toLowerCase() === k));
+  const name = list.length ? list[0].tags.find((x) => x.toLowerCase() === k) : key;
+  return { name, list };
+}
+
+function sortCollections(cols) {
+  const byName = (a, b) => a.name.localeCompare(b.name, locale(), { sensitivity: 'base' });
+  const newest = (c) => Math.max(...c.list.map((r) => r.created || 0));
+  const oldest = (c) => Math.min(...c.list.map((r) => r.created || 0));
+  if (collSort === 'za') return cols.sort((a, b) => byName(b, a));
+  if (collSort === 'new') return cols.sort((a, b) => newest(b) - newest(a) || byName(a, b));
+  if (collSort === 'old') return cols.sort((a, b) => oldest(a) - oldest(b) || byName(a, b));
+  if (collSort === 'count') return cols.sort((a, b) => b.list.length - a.list.length || byName(a, b));
+  return cols.sort(byName);
+}
+
+function collectionCard(key, name, list, extra = {}) {
+  const newestFirst = [...list].sort((a, b) => (b.created || 0) - (a.created || 0));
+  const thumbs = newestFirst.map((r) => r.thumb).filter(Boolean);
+  let cover;
+  if (extra.untagged) {
+    cover = h('div', { class: 'cover hint-cover' }, icon('tag'), h('span', {}, t('untaggedHint')));
+  } else if (thumbs.length >= 4) {
+    cover = h('div', { class: 'cover mosaic' }, thumbs.slice(0, 4).map((src) => h('img', { src, alt: '', loading: 'lazy' })));
+  } else if (thumbs.length) {
+    cover = h('div', { class: 'cover' }, h('img', { src: thumbs[0], alt: '', loading: 'lazy' }));
+  } else {
+    cover = h('div', { class: 'cover' }, h('div', { class: 'placeholder' }, extra.fav ? icon('heart') : (name || '?').trim()[0].toUpperCase()));
+  }
+  if (extra.fav) cover.append(h('span', { class: 'coll-badge' }, icon('heart', 'sm')));
+  return h('div', { class: 'coll' + (extra.fav ? ' fav' : '') + (extra.untagged ? ' untagged' : ''), role: 'button', tabindex: 0, onclick: () => go('#/c/' + encodeURIComponent(key)) },
+    cover, h('h3', {}, name), h('div', { class: 'meta' }, t('recipeCount', list.length)));
+}
+
+function renderCollections() {
+  const s = screen();
+  const cols = sortCollections(collections());
+  const favs = recipes.filter((r) => r.favorite);
+  const untagged = recipes.filter((r) => !(r.tags || []).length);
+
+  const head = h('header', { class: 'home-head' },
+    h('div', {}, h('h1', {}, t('collections')), h('div', { class: 'count' }, t('collectionCount', cols.length))),
+    h('button', { class: 'icon-btn', 'aria-label': t('settings'), onclick: () => go('#/settings') }, icon('settings')));
+  s.append(head);
+
+  if (!recipes.length) {
+    s.append(h('div', { class: 'empty' }, h('h3', {}, t('noCollectionsTitle')), h('p', {}, t('noCollectionsBody'))));
+    app.append(bottomNav('collections'));
+    return;
+  }
+  const sortRow = h('div', { class: 'sort-row' },
+    h('span', {}),
+    h('button', { class: 'sort-btn', onclick: () => sortSheet(CSORTS, collSort, 'csort_').then((k) => {
+      if (!k) return; collSort = k; localStorage.setItem('csort', k); renderCollections();
+    }) }, t('csort_' + collSort), icon('chevron', 'sm')));
+  const grid = h('div', { class: 'grid coll-grid' });
+  // Favorites always first, Untagged always last
+  grid.append(collectionCard(FAV_KEY, t('favorites'), favs, { fav: true }));
+  for (const c of cols) grid.append(collectionCard(c.key, c.name, c.list));
+  if (untagged.length) grid.append(collectionCard(UNTAGGED_KEY, t('untagged'), untagged, { untagged: true }));
+  s.append(sortRow, grid, !cols.length ? h('p', { class: 'hint', style: { padding: '0 20px' } }, t('noTagsCollectionsHint')) : null);
+  app.append(bottomNav('collections'));
+}
+
+function renderCollection(key) {
+  const s = screen();
+  const { name, list } = collectionList(key);
+  const grid = h('div', { class: 'grid' });
+  const sortBtn = h('button', { class: 'sort-btn' });
+  function draw() {
+    sortBtn.innerHTML = ''; sortBtn.append(t('sort_' + homeState.sort), icon('chevron', 'sm'));
+    grid.innerHTML = '';
+    for (const r of sortList([...list])) grid.append(card(r));
+  }
+  sortBtn.addEventListener('click', () => openRecipeSort(draw));
+  s.append(
+    h('div', { class: 'bar' },
+      h('button', { class: 'icon-btn', 'aria-label': t('back'), onclick: () => (history.length > 1 ? history.back() : go('#/c')) }, icon('back')),
+      h('h2', {}, name)),
+    key === UNTAGGED_KEY && list.length ? h('p', { class: 'hint', style: { padding: '0 20px', margin: '4px 0 0' } }, t('untaggedBody')) : null,
+    list.length ? h('div', { class: 'sort-row' }, h('span', {}, t('recipeCount', list.length)), sortBtn) : null,
+    grid,
+    !list.length ? h('div', { class: 'empty' }, h('h3', {}, t('nothingHere')),
+      h('p', {}, key === FAV_KEY ? t('noFavsYet') : t('collectionEmpty'))) : null);
+  draw();
 }
 
 function card(r) {
@@ -199,7 +395,10 @@ function card(r) {
   }, icon('heart'));
   ph.append(heart);
   const tags = (r.tags || []).slice(0, 2).join(' · ');
-  return h('div', { class: 'card', role: 'button', tabindex: 0, onclick: () => go('#/r/' + r.id) }, ph, h('h3', {}, r.title), tags ? h('div', { class: 'meta' }, tags) : null);
+  const { avg } = ratingInfo(r);
+  const rating = avg != null ? h('span', { class: 'card-rating' }, icon('star'), fmtAvg(avg)) : null;
+  return h('div', { class: 'card', role: 'button', tabindex: 0, onclick: () => go('#/r/' + r.id) }, ph, h('h3', {}, r.title),
+    tags || rating ? h('div', { class: 'meta' }, rating, rating && tags ? ' · ' : null, tags || null) : null);
 }
 
 // =====================================================================
@@ -364,7 +563,7 @@ function setChecks(id, c) { localStorage.setItem('checks:' + id, JSON.stringify(
 
 async function renderDetail(id) {
   const r = await db.getRecipe(id);
-  if (!r) return go('#/');
+  if (!r || r.deleted) return go('#/');
   const photos = await db.getPhotos(r.photoIds || []);
   const s = screen();
   const tab = tabState.get(id) || 'ingredients';
@@ -404,8 +603,14 @@ async function renderDetail(id) {
     r.totalTime ? [t('total'), r.totalTime] : null,
   ].filter(Boolean);
 
+  const info = ratingInfo(r);
+  const ratingLine = info.made ? h('button', { class: 'rating-line', onclick: () => { showTab('cooklog'); tabs.scrollIntoView({ behavior: 'smooth' }); } },
+    info.avg != null ? [starsView(info.avg), h('b', {}, fmtAvg(info.avg)), h('span', { class: 'dot' }, '·')] : null,
+    h('span', {}, t('madeN', info.made))) : null;
+
   const body = h('div', { class: 'detail-body' },
     h('h1', {}, r.title),
+    ratingLine,
     tagsRow(r),
     facts.length ? h('div', { class: 'facts' }, facts.map(([k, v]) => h('div', {}, k, h('b', {}, v)))) : null);
 
@@ -413,22 +618,28 @@ async function renderDetail(id) {
   const tabs = h('div', { class: 'tabs' });
   const tabDefs = [
     ['ingredients', t('ingredients')], ['steps', t('steps')],
-    ['notes', t('notes') + (r.notes && r.notes.length ? ` ${r.notes.length}` : '')],
-    ['photos', t('photos') + (photos.length ? ` ${photos.length}` : '')],
+    ['cooklog', t('cookLog'), info.made],
+    ['notes', t('notes'), (r.notes || []).length],
+    ['photos', t('photos'), photos.length],
   ];
   function showTab(name) {
     tabState.set(id, name);
     [...tabs.children].forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+    const on = tabs.querySelector('.on');
+    if (on) tabs.scrollTo({ left: on.offsetLeft - tabs.clientWidth / 2 + on.offsetWidth / 2, behavior: 'smooth' });
     panel.innerHTML = '';
     if (name === 'ingredients') ingredientsPanel(panel, r);
     if (name === 'steps') stepsPanel(panel, r);
+    if (name === 'cooklog') cookLogPanel(panel, r, () => renderDetail(id));
     if (name === 'notes') notesPanel(panel, r, () => renderDetail(id));
     if (name === 'photos') photosPanel(panel, r, photos, () => renderDetail(id));
   }
-  for (const [key, label] of tabDefs) tabs.append(h('button', { 'data-tab': key, onclick: () => showTab(key) }, label));
+  for (const [key, label, n] of tabDefs) {
+    tabs.append(h('button', { 'data-tab': key, onclick: () => showTab(key) }, label, n ? h('span', { class: 'tab-n' }, n) : null));
+  }
 
-  s.append(hero, body, tabs, panel,
-    h('button', { class: 'cook-cta', onclick: () => openCookMode(r) }, icon('flame'), t('startCooking')));
+  s.append(hero, body, tabs, panel);
+  app.append(h('button', { class: 'cook-cta', onclick: () => openCookMode(r) }, icon('flame'), t('startCooking')));
   showTab(tab);
 }
 
@@ -610,6 +821,124 @@ function stepsPanel(panel, r) {
     resetChecksBtn(r, 's', panel, () => stepsPanel(panel, r)));
 }
 
+// ---------- Cook log ----------
+// Each entry: { id, date, rating (0.5–5, or 0 for none), text, photoIds }
+// Entry photos stay off the recipe card unless "Add to recipe photos" is on.
+
+async function cookLogPanel(panel, r, rerenderAll) {
+  const info = ratingInfo(r);
+  const entries = [...(r.cooks || [])].sort((a, b) => b.date - a.date);
+  const photoMap = new Map((await db.getPhotos(entries.flatMap((c) => c.photoIds || []))).map((p) => [p.id, p]));
+  if (!panel.isConnected) return;
+
+  if (info.made) {
+    panel.append(h('div', { class: 'cook-summary' },
+      h('div', { class: 'cs-rating' },
+        h('div', { class: 'big' }, info.avg != null ? fmtAvg(info.avg) : '–'),
+        h('div', {}, starsView(info.avg || 0), h('small', {}, info.avg != null ? t('fromRatings', info.rated) : t('noRatingsYet')))),
+      h('div', { class: 'cs-made' }, h('b', {}, info.made), h('small', {}, t('timesMade', info.made)))));
+  }
+  panel.append(h('button', { class: 'btn primary block', style: { marginBottom: '16px' }, onclick: () => cookEntrySheet(r.id, null, rerenderAll) },
+    icon('plus', 'sm'), t('logACook')));
+
+  for (const c of entries) {
+    const ps = (c.photoIds || []).map((id) => photoMap.get(id)).filter(Boolean);
+    panel.append(h('button', { class: 'note cook-entry', onclick: () => cookEntrySheet(r.id, c.id, rerenderAll) },
+      h('div', { class: 'ce-head' }, h('time', {}, fmtDate(c.date)), c.rating ? starsView(c.rating, 'sm') : h('small', {}, t('notRated'))),
+      c.text ? h('div', { class: 'ce-text' }, c.text) : null,
+      ps.length ? h('div', { class: 'ce-photos' }, ps.map((p) => h('img', { src: p.data, alt: '', loading: 'lazy' }))) : null));
+  }
+  if (!entries.length) panel.append(h('p', { class: 'hint' }, t('cookLogHint')));
+}
+
+async function cookEntrySheet(recipeId, entryId, after) {
+  const r = await db.getRecipe(recipeId);
+  if (!r) return;
+  r.cooks = r.cooks || [];
+  const entry = entryId ? r.cooks.find((c) => c.id === entryId) : null;
+  const dateStr = (ts) => new Date(ts - new Date(ts).getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+
+  // Photos in this sheet: existing ones (by id) and new ones (data only)
+  const existing = entry ? await db.getPhotos(entry.photoIds || []) : [];
+  let items = existing.map((p) => ({ id: p.id, src: p.data, toRecipe: (r.photoIds || []).includes(p.id) }));
+  const removed = [];
+  let rating = entry ? entry.rating || 0 : 0;
+
+  const res = await openSheet((box, close) => {
+    const date = h('input', { type: 'date', value: dateStr(entry ? entry.date : Date.now()) });
+    const text = h('textarea', { rows: 4 });
+    text.value = entry ? entry.text || '' : '';
+    rotatingPlaceholder(text, t('cookNoteIdeas'));
+    const strip = h('div', { class: 'ce-strip' });
+    function drawPhotos() {
+      strip.innerHTML = '';
+      for (const it of items) {
+        strip.append(h('div', { class: 'ce-ph' },
+          h('div', { class: 'p' }, h('img', { src: it.src, alt: '' }),
+            h('button', { type: 'button', class: 'rm', 'aria-label': t('removePhoto'), onclick: () => {
+              if (it.id) removed.push(it.id);
+              items = items.filter((x) => x !== it); drawPhotos();
+            } }, icon('x'))),
+          h('button', { type: 'button', class: 'to-recipe' + (it.toRecipe ? ' on' : ''), onclick: () => { it.toRecipe = !it.toRecipe; drawPhotos(); } },
+            it.toRecipe ? icon('check', 'sm') : icon('plus', 'sm'), it.toRecipe ? t('inRecipePhotos') : t('addToRecipePhotos'))));
+      }
+      strip.append(h('button', { type: 'button', class: 'add', 'aria-label': t('addPhotos'), onclick: async () => {
+        const files = await pickFiles({ multiple: true });
+        for (const f of files) items.push({ src: await resizeImage(f), toRecipe: false });
+        drawPhotos();
+      } }, icon('camera')));
+    }
+    drawPhotos();
+    box.append(
+      h('h3', {}, entry ? t('editCook') : t('logACook')),
+      h('div', { class: 'field' }, h('label', {}, t('ratingOptional')), starInput(rating, (v) => { rating = v; })),
+      h('div', { class: 'field', style: { marginTop: '12px' } }, h('label', {}, t('dateMade')), date),
+      h('div', { class: 'field', style: { marginTop: '12px' } }, h('label', {}, t('howDidItGo')), text),
+      h('div', { class: 'field', style: { marginTop: '12px' } }, h('label', {}, t('photos')), strip,
+        h('div', { class: 'help' }, t('cookPhotosHelp'))),
+      h('div', { class: 'actions', style: { display: 'flex', justifyContent: entry ? 'space-between' : 'flex-end', gap: '10px', marginTop: '18px' } },
+        entry ? h('button', { class: 'btn sm danger', onclick: () => close('delete') }, icon('trash', 'sm'), t('delete')) : null,
+        h('button', { class: 'btn sm primary', onclick: () => close({ date: date.value, text: text.value.trim() }) }, t('save'))));
+  });
+  if (!res) return;
+
+  // Re-read in case something changed while the sheet was open
+  const fresh = await db.getRecipe(recipeId);
+  fresh.cooks = fresh.cooks || [];
+  fresh.photoIds = fresh.photoIds || [];
+  const usedElsewhere = (pid) => fresh.photoIds.includes(pid);
+
+  if (res === 'delete') {
+    if (!(await confirmDialog({ title: t('deleteCookQ'), message: t('deleteCookBody'), ok: t('delete'), danger: true }))) return;
+    const old = fresh.cooks.find((c) => c.id === entryId);
+    for (const pid of (old && old.photoIds) || []) if (!usedElsewhere(pid)) await db.deletePhoto(pid);
+    fresh.cooks = fresh.cooks.filter((c) => c.id !== entryId);
+  } else {
+    const when = res.date ? new Date(res.date + 'T12:00:00').getTime() : Date.now();
+    const ids = [];
+    for (const it of items) {
+      if (!it.id) {
+        const p = await db.putPhoto({ id: db.uid(), recipeId, data: it.src, caption: '', date: when });
+        it.id = p.id;
+      }
+      ids.push(it.id);
+      const inRecipe = fresh.photoIds.includes(it.id);
+      if (it.toRecipe && !inRecipe) fresh.photoIds.push(it.id);
+      if (!it.toRecipe && inRecipe) fresh.photoIds = fresh.photoIds.filter((x) => x !== it.id);
+    }
+    // Photos removed from the entry are deleted unless they're still on the recipe card
+    for (const pid of removed) if (!usedElsewhere(pid)) await db.deletePhoto(pid);
+    const data = { date: when, rating: rating || 0, text: res.text, photoIds: ids };
+    if (entryId) fresh.cooks = fresh.cooks.map((c) => (c.id === entryId ? { ...c, ...data } : c));
+    else fresh.cooks.push({ id: db.uid(), ...data });
+  }
+  await updateThumb(fresh);
+  await db.putRecipe(fresh); await refresh();
+  toast(res === 'delete' ? t('cookDeleted') : entryId ? t('saved') : t('cookLogged'));
+  tabState.set(recipeId, 'cooklog');
+  after();
+}
+
 function notesPanel(panel, r, rerenderAll) {
   const ta = h('textarea', { rows: 3, placeholder: t('notePlaceholder') });
   const add = h('button', { class: 'btn sm primary', onclick: async () => {
@@ -717,8 +1046,10 @@ function openViewer(r, p, index, rerenderAll) {
       await updateThumb(r); await db.putRecipe(r); await refresh();
       toast(t('coverUpdated'));
     } else if (action === 'delete') {
-      if (!(await confirmDialog({ title: t('deletePhotoQ'), ok: t('delete'), danger: true }))) return;
-      await db.deletePhoto(p.id);
+      // A photo that also belongs to a cook log entry stays there
+      const inLog = (r.cooks || []).some((c) => (c.photoIds || []).includes(p.id));
+      if (!(await confirmDialog({ title: inLog ? t('removePhotoQ') : t('deletePhotoQ'), message: inLog ? t('removePhotoBody') : '', ok: inLog ? t('remove') : t('delete'), danger: true }))) return;
+      if (!inLog) await db.deletePhoto(p.id);
       r.photoIds = r.photoIds.filter((x) => x !== p.id);
       await updateThumb(r); await db.putRecipe(r); await refresh();
     } else return;
@@ -786,7 +1117,7 @@ function openCookMode(r) {
         h('h2', {}, t('allDone')),
         h('p', { style: { color: 'var(--muted)', margin: '0 0 22px' } }, t('allDoneBody')),
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'center' } },
-          h('button', { class: 'btn primary', onclick: () => { tabState.set(r.id, 'photos'); exit(); setTimeout(() => addPhotos(r, () => renderDetail(r.id)), 300); } }, icon('camera'), t('addAPhoto')),
+          h('button', { class: 'btn primary', onclick: () => { tabState.set(r.id, 'cooklog'); exit(); setTimeout(() => cookEntrySheet(r.id, null, () => renderDetail(r.id)), 350); } }, icon('star'), t('logThisCook')),
           h('button', { class: 'btn', onclick: () => { tabState.set(r.id, 'notes'); exit(); } }, icon('note'), t('writeANote')))));
       nav.append(
         h('button', { class: 'btn prev', 'aria-label': t('previous'), onclick: () => { idx--; draw(); } }, icon('back')),
@@ -941,12 +1272,22 @@ async function renderEditor(id) {
     h('div', { class: 'row3' }, field(t('prep'), prep), field(t('cook'), cook), field(t('total'), total)),
     field(t('ingredients'), ings, t('ingredientsHelp')),
     field(t('steps'), steps, t('stepsHelp')),
-    existing ? h('button', { class: 'btn danger block', onclick: async () => {
-      if (!(await confirmDialog({ title: t('deleteRecipeQ'), message: t('deleteRecipeBody'), ok: t('delete'), danger: true }))) return;
-      await db.deleteRecipe(existing.id); localStorage.removeItem('checks:' + existing.id);
-      backGuard = null;
-      await refresh(); toast(t('recipeDeleted')); location.replace('#/'); history.replaceState(null, '', '#/');
-    } }, icon('trash', 'sm'), t('deleteRecipe')) : null,
+    existing ? h('div', { class: 'editor-actions' },
+      h('button', { class: 'btn primary block', onclick: async () => {
+        if (dirty && !(await confirmDialog({ title: t('duplicateUnsavedQ'), message: t('duplicateUnsavedBody'), ok: t('duplicate') }))) return;
+        const copy = await duplicateRecipe(existing.id);
+        backGuard = null;
+        await refresh(); toast(t('duplicated'));
+        location.replace('#/r/' + copy.id);
+      } }, icon('copy', 'sm'), t('duplicateRecipe')),
+      h('button', { class: 'btn danger block', onclick: async () => {
+        if (!(await confirmDialog({ title: t('deleteRecipeQ'), ok: t('delete'), danger: true }))) return;
+        const fresh = await db.getRecipe(existing.id);
+        fresh.deleted = Date.now();
+        await db.putRecipe(fresh);
+        backGuard = null;
+        await refresh(); toast(t('movedToBin')); location.replace('#/'); history.replaceState(null, '', '#/');
+      } }, icon('trash', 'sm'), t('deleteRecipe'))) : null,
   );
   form.addEventListener('input', (e) => { if (e.target !== tagInput) markDirty(); });
 
@@ -958,6 +1299,65 @@ async function renderEditor(id) {
       h('h2', {}, existing ? t('editRecipe') : t('newRecipe')), saveBtn),
     form);
   if (!existing && !d.title) title.focus();
+}
+
+// Copies everything except the cook log, so the copy starts with a fresh rating
+async function duplicateRecipe(id) {
+  const src = await db.getRecipe(id);
+  const copy = JSON.parse(JSON.stringify(src));
+  copy.id = db.uid();
+  copy.title = t('copyTitle', src.title);
+  copy.cooks = [];
+  copy.favorite = false;
+  delete copy.created; delete copy.updated; delete copy.deleted;
+  copy.notes = (src.notes || []).map((n) => ({ ...n, id: db.uid() }));
+  copy.photoIds = [];
+  for (const p of await db.getPhotos(src.photoIds || [])) {
+    const np = await db.putPhoto({ ...p, id: db.uid(), recipeId: copy.id });
+    copy.photoIds.push(np.id);
+  }
+  await db.putRecipe(copy);
+  return copy;
+}
+
+// =====================================================================
+// RECYCLE BIN
+// =====================================================================
+
+function renderBin() {
+  const s = screen();
+  const bar = h('div', { class: 'bar' },
+    h('button', { class: 'icon-btn', 'aria-label': t('back'), onclick: () => (history.length > 1 ? history.back() : go('#/settings')) }, icon('back')),
+    h('h2', {}, t('recycleBin')),
+    binList.length ? h('button', { class: 'btn sm danger', onclick: async () => {
+      if (!(await confirmDialog({ title: t('emptyBinQ', binList.length), message: t('cantUndo'), ok: t('emptyBin'), danger: true }))) return;
+      for (const r of binList) { await db.deleteRecipe(r.id); localStorage.removeItem('checks:' + r.id); }
+      await refresh(); toast(t('binEmptied')); renderBin();
+    } }, t('emptyBin')) : null);
+  s.append(bar);
+  if (!binList.length) {
+    s.append(h('div', { class: 'empty' }, h('h3', {}, t('binEmptyTitle')), h('p', {}, t('binEmptyBody'))));
+    return;
+  }
+  const list = h('div', { class: 'bin-list' });
+  for (const r of binList) {
+    const daysLeft = Math.max(1, Math.ceil((r.deleted + BIN_DAYS * DAY - Date.now()) / DAY));
+    list.append(h('div', { class: 'bin-item' },
+      h('div', { class: 'bin-ph' }, r.thumb ? h('img', { src: r.thumb, alt: '' }) : h('div', { class: 'placeholder' }, (r.title || '?').trim()[0].toUpperCase())),
+      h('div', { class: 'bin-txt' }, h('b', {}, r.title), h('small', {}, t('deletesInDays', daysLeft))),
+      h('button', { class: 'btn sm', onclick: async () => {
+        const fresh = await db.getRecipe(r.id);
+        delete fresh.deleted;
+        await db.putRecipe(fresh); await refresh();
+        toast(t('restoredRecipe')); renderBin();
+      } }, t('restore')),
+      h('button', { class: 'icon-btn', 'aria-label': t('deleteForever'), onclick: async () => {
+        if (!(await confirmDialog({ title: t('deleteForeverQ'), message: t('cantUndo'), ok: t('deleteForever'), danger: true }))) return;
+        await db.deleteRecipe(r.id); localStorage.removeItem('checks:' + r.id);
+        await refresh(); toast(t('deletedForever')); renderBin();
+      } }, icon('trash'))));
+  }
+  s.append(h('p', { class: 'hint', style: { padding: '4px 20px 0' } }, t('binHint')), list);
 }
 
 // =====================================================================
@@ -996,6 +1396,10 @@ function renderSettings() {
           h('button', { class: 'row-item', onclick: exportBackup }, h('div', {}, t('saveBackup'), h('small', {}, t('saveBackupSub', recipes.length))), icon('download')),
           h('button', { class: 'row-item', onclick: importBackup }, h('div', {}, t('restoreBackup'), h('small', {}, t('restoreBackupSub'))), icon('upload'))),
         h('p', { class: 'hint', style: { margin: '8px 4px 0' } }, t('backupHint'))),
+      h('div', {}, h('div', { class: 'group-title' }, t('recycleBin')),
+        h('div', { class: 'group' },
+          h('button', { class: 'row-item', onclick: () => go('#/bin') },
+            h('div', {}, t('recycleBin'), h('small', {}, binList.length ? t('binSub', binList.length) : t('binSubEmpty'))), icon('trash')))),
     ));
 }
 
@@ -1028,6 +1432,7 @@ window.addEventListener('hashchange', route);
 onBackButton(handleBack);
 (async function start() {
   applyTheme();
+  try { await purgeBin(); } catch { /* try again next start */ }
   await refresh();
   initTimers();
   route();
