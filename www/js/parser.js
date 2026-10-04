@@ -7,6 +7,10 @@ const UNICODE_FRACTIONS = {
 };
 const UF = Object.keys(UNICODE_FRACTIONS).join('');
 
+// Language for unit names and durations ('en' or 'es')
+let parserLang = 'en';
+export function setParserLang(l) { parserLang = l === 'es' ? 'es' : 'en'; }
+
 // One quantity: "1 1/2", "1½", "1 ½", "3/4", "½", "2.5", "2,5", "150"
 const QTY = `(?:\\d+\\s+\\d+\\/\\d+|\\d+\\/\\d+|\\d+\\s*[${UF}]|[${UF}]|\\d+(?:[.,]\\d+)?)`;
 const QTY_RE = new RegExp(`^(\\s*)(${QTY})(?:(\\s*(?:-|–|—|to)\\s*)(${QTY}))?`, 'i');
@@ -63,13 +67,13 @@ export function formatQty(n, metric = false) {
 // ---------- Units & conversion ----------
 
 const UNITS = {
-  tsp: { dim: 'v', f: 4.929, one: 'tsp', many: 'tsp', sys: 'spoon' },
-  tbsp: { dim: 'v', f: 14.787, one: 'tbsp', many: 'tbsp', sys: 'spoon' },
-  cup: { dim: 'v', f: 236.59, one: 'cup', many: 'cups', sys: 'us' },
-  floz: { dim: 'v', f: 29.574, one: 'fl oz', many: 'fl oz', sys: 'us' },
-  pint: { dim: 'v', f: 473.18, one: 'pint', many: 'pints', sys: 'us' },
-  quart: { dim: 'v', f: 946.35, one: 'quart', many: 'quarts', sys: 'us' },
-  gallon: { dim: 'v', f: 3785.4, one: 'gallon', many: 'gallons', sys: 'us' },
+  tsp: { dim: 'v', f: 4.929, one: 'tsp', many: 'tsp', es: ['cdta.', 'cdtas.'], sys: 'spoon' },
+  tbsp: { dim: 'v', f: 14.787, one: 'tbsp', many: 'tbsp', es: ['cda.', 'cdas.'], sys: 'spoon' },
+  cup: { dim: 'v', f: 236.59, one: 'cup', many: 'cups', es: ['taza', 'tazas'], sys: 'us' },
+  floz: { dim: 'v', f: 29.574, one: 'fl oz', many: 'fl oz', es: ['oz líq.', 'oz líq.'], sys: 'us' },
+  pint: { dim: 'v', f: 473.18, one: 'pint', many: 'pints', es: ['pinta', 'pintas'], sys: 'us' },
+  quart: { dim: 'v', f: 946.35, one: 'quart', many: 'quarts', es: ['cuarto', 'cuartos'], sys: 'us' },
+  gallon: { dim: 'v', f: 3785.4, one: 'gallon', many: 'gallons', es: ['galón', 'galones'], sys: 'us' },
   ml: { dim: 'v', f: 1, one: 'ml', many: 'ml', sys: 'metric' },
   cl: { dim: 'v', f: 10, one: 'cl', many: 'cl', sys: 'metric' },
   dl: { dim: 'v', f: 100, one: 'dl', many: 'dl', sys: 'metric' },
@@ -79,10 +83,10 @@ const UNITS = {
   mg: { dim: 'w', f: 0.001, one: 'mg', many: 'mg', sys: 'metric' },
   oz: { dim: 'w', f: 28.3495, one: 'oz', many: 'oz', sys: 'us' },
   lb: { dim: 'w', f: 453.59, one: 'lb', many: 'lb', sys: 'us' },
-  stick: { dim: 'w', f: 113.4, one: 'stick', many: 'sticks', sys: 'us' },
+  stick: { dim: 'w', f: 113.4, one: 'stick', many: 'sticks', es: ['barra', 'barras'], sys: 'us' },
 };
 
-const UNIT_RE = /^\s*(fl\.?\s*oz\.?|fluid\s+ounces?|tablespoons?|tbsps?\.?|tbs\.?|tbl\.?|teaspoons?|tsps?\.?|cups?|c\.?|ounces?|oz\.?|pounds?|lbs?\.?|grams?|gr?\.?|kilograms?|kgs?\.?|milligrams?|mg|millilit(?:er|re)s?|mls?|centilit(?:er|re)s?|cl|decilit(?:er|re)s?|dl|lit(?:er|re)s?|l|pints?|pt\.?|quarts?|qts?\.?|gallons?|gal\.?|sticks?|T|t)(?![a-z])/i;
+const UNIT_RE = /^\s*(tazas?|cucharaditas?|cucharadas?|cdtas?\.?|cditas?\.?|cdas?\.?|gramos?|kilogramos?|kilos?|mililitros?|litros?|onzas?|libras?|fl\.?\s*oz\.?|fluid\s+ounces?|tablespoons?|tbsps?\.?|tbs\.?|tbl\.?|teaspoons?|tsps?\.?|cups?|c\.?|ounces?|oz\.?|pounds?|lbs?\.?|grams?|gr?\.?|kilograms?|kgs?\.?|milligrams?|mg|millilit(?:er|re)s?|mls?|centilit(?:er|re)s?|cl|decilit(?:er|re)s?|dl|lit(?:er|re)s?|l|pints?|pt\.?|quarts?|qts?\.?|gallons?|gal\.?|sticks?|T|t)(?![a-záéíóúñ])/i;
 
 function unitKey(tok) {
   const t = tok.replace(/\./g, '').replace(/\s+/g, ' ').trim();
@@ -106,26 +110,44 @@ function unitKey(tok) {
   if (/^(quarts?|qts?)$/.test(l)) return 'quart';
   if (/^(gallons?|gal)$/.test(l)) return 'gallon';
   if (/^sticks?$/.test(l)) return 'stick';
+  // Spanish
+  if (/^tazas?$/.test(l)) return 'cup';
+  if (/^(cucharaditas?|cdtas?|cditas?)$/.test(l)) return 'tsp';
+  if (/^(cucharadas?|cdas?)$/.test(l)) return 'tbsp';
+  if (/^gramos?$/.test(l)) return 'g';
+  if (/^(kilogramos?|kilos?)$/.test(l)) return 'kg';
+  if (/^mililitros?$/.test(l)) return 'ml';
+  if (/^litros?$/.test(l)) return 'l';
+  if (/^onzas?$/.test(l)) return 'oz';
+  if (/^libras?$/.test(l)) return 'lb';
   return null;
 }
 
 // Grams per millilitre for common baking & cooking ingredients (most specific first)
 const DENSITIES = [
-  [/bread flour/, 0.537], [/cake flour|pastry flour/, 0.482], [/almond flour|almond meal/, 0.406],
-  [/whole wheat flour/, 0.507], [/coconut flour/, 0.473], [/rye flour/, 0.432], [/flour/, 0.507],
-  [/brown sugar/, 0.9], [/powdered sugar|confectioners|icing sugar/, 0.507], [/coconut sugar/, 0.634],
-  [/sugar/, 0.845], [/cocoa/, 0.355], [/cornstarch|corn starch|cornflour/, 0.473],
-  [/baking soda|bicarbonate/, 1.22], [/baking powder/, 0.81], [/kosher salt/, 0.6], [/salt/, 1.22],
-  [/yeast/, 0.6], [/cinnamon|spice|nutmeg|ginger|cloves|allspice|paprika|cumin/, 0.5],
-  [/peanut butter|almond butter/, 1.14], [/butter/, 0.959], [/shortening/, 0.81], [/oil/, 0.92, true],
-  [/honey/, 1.42], [/molasses/, 1.42], [/maple syrup|corn syrup|syrup/, 1.33],
-  [/cream cheese/, 0.96], [/sour cream/, 0.97], [/heavy cream|whipping cream|double cream|half and half|cream/, 1.0, true],
-  [/yogurt|yoghurt/, 1.03], [/buttermilk|milk/, 1.03, true], [/water|broth|stock|juice|coffee|wine|vinegar/, 1.0, true],
-  [/pumpkin/, 0.96], [/applesauce/, 1.05], [/mashed banana|banana/, 0.95],
-  [/rolled oats|oats/, 0.38], [/rice/, 0.78], [/chocolate chips|chips/, 0.72],
-  [/shredded coconut|coconut/, 0.36], [/raisins|cranberries/, 0.63],
-  [/walnuts|pecans|nuts|almonds/, 0.48], [/shredded cheese|grated cheese|parmesan|cheese/, 0.42],
-  [/breadcrumbs|bread crumbs|panko/, 0.25], [/vanilla|extract/, 0.88, true],
+  [/bread flour|harina (?:de|para) pan/, 0.537], [/cake flour|pastry flour|harina para pastel/, 0.482],
+  [/almond flour|almond meal|harina de almendras?/, 0.406], [/whole wheat flour|harina integral/, 0.507],
+  [/coconut flour|harina de coco/, 0.473], [/rye flour|harina de centeno/, 0.432], [/flour|harina/, 0.507],
+  [/brown sugar|az[uú]car morena|mascabado/, 0.9],
+  [/powdered sugar|confectioners|icing sugar|az[uú]car glass?|az[uú]car pulverizada|az[uú]car impalpable/, 0.507],
+  [/coconut sugar|az[uú]car de coco/, 0.634], [/sugar|az[uú]car/, 0.845],
+  [/cocoa|cacao/, 0.355], [/cornstarch|corn starch|cornflour|maicena|f[eé]cula de ma[ií]z/, 0.473],
+  [/baking soda|bicarbonate|bicarbonato/, 1.22], [/baking powder|polvo (?:para|de) hornear/, 0.81],
+  [/kosher salt|sal kosher/, 0.6], [/salt|\bsal\b/, 1.22], [/yeast|levadura/, 0.6],
+  [/cinnamon|spice|nutmeg|ginger|cloves|allspice|paprika|cumin|canela|nuez moscada|jengibre|clavo|comino|piment[oó]n/, 0.5],
+  [/peanut butter|almond butter|crema de cacahuate|mantequilla de cacahuate|mantequilla de man[ií]/, 1.14],
+  [/butter|mantequilla|margarina/, 0.959], [/shortening|manteca/, 0.81], [/oil|aceite/, 0.92, true],
+  [/honey|miel de abeja/, 1.42], [/molasses|melaza/, 1.42], [/maple syrup|corn syrup|syrup|jarabe|miel de maple/, 1.33], [/miel/, 1.42],
+  [/cream cheese|queso crema/, 0.96], [/sour cream|crema [aá]cida/, 0.97],
+  [/heavy cream|whipping cream|double cream|half and half|cream|crema/, 1.0, true],
+  [/yogurt|yoghurt|yogur/, 1.03], [/condensed milk|leche condensada/, 1.3, true], [/buttermilk|milk|leche/, 1.03, true],
+  [/water|broth|stock|juice|coffee|wine|vinegar|agua|caldo|jugo|caf[eé]|vino|vinagre|consom[eé]/, 1.0, true],
+  [/pumpkin|calabaza/, 0.96], [/applesauce|pur[eé] de manzana/, 1.05], [/mashed banana|banana|pl[aá]tano/, 0.95],
+  [/rolled oats|oats|avena/, 0.38], [/rice|arroz/, 0.78], [/chocolate chips|chips|chispas/, 0.72],
+  [/shredded coconut|coconut|coco rallado|\bcoco\b/, 0.36], [/raisins|cranberries|pasas|ar[aá]ndanos/, 0.63],
+  [/walnuts|pecans|nuts|almonds|nuez|nueces|almendras|cacahuates?/, 0.48],
+  [/shredded cheese|grated cheese|parmesan|cheese|queso/, 0.42],
+  [/breadcrumbs|bread crumbs|panko|pan molido/, 0.25], [/vanilla|extract|vainilla|extracto/, 0.88, true],
 ];
 export function densityFor(name) {
   const n = String(name || '').toLowerCase();
@@ -152,7 +174,21 @@ function pickUsVolume(ml) {
 }
 
 // plural based on what is shown, so 1.05 cups (shown as "1") reads "1 cup"
-function unitLabel(key, n) { const u = UNITS[key]; return parseQty(formatQty(n, u.sys === 'metric')) > 1 ? u.many : u.one; }
+function unitLabel(key, n, lang = parserLang) {
+  const u = UNITS[key];
+  const many = parseQty(formatQty(n, u.sys === 'metric')) > 1;
+  if (lang === 'es' && u.es) return u.es[many ? 1 : 0];
+  return many ? u.many : u.one;
+}
+
+// Is this ingredient line written in Spanish or English? (for unit names)
+const ES_UNIT = /^\s*(tazas?|cucharaditas?|cucharadas?|cdtas?|cditas?|cdas?|gramos?|kilogramos?|kilos?|mililitros?|litros?|onzas?|libras?)\b/i;
+const EN_UNIT = /^\s*(cups?|tablespoons?|teaspoons?|tbsps?|tsps?|ounces?|pounds?|lbs?|grams?|sticks?)\b/i;
+function lineLang(p) {
+  if (ES_UNIT.test(p.unitText || '') || /^\s*de\s/i.test(p.name || '')) return 'es';
+  if (EN_UNIT.test(p.unitText || '')) return 'en';
+  return parserLang;
+}
 
 // Convert an amount (in ml or g) into the chosen system.
 // Returns { n, key } or { text } for metric output.
@@ -211,6 +247,7 @@ export function scaleIngredient(line, factor = 1, system = 'original') {
   if (p.section || p.qty == null) return { ...p, display: p.text, scaled: false };
   const u = p.unit ? UNITS[p.unit] : null;
   const density = densityFor(p.name);
+  const ll = lineLang(p);
   const base = { ...p, density };
 
   const needsConvert = u && system !== 'original' && u.sys !== 'spoon' &&
@@ -236,7 +273,7 @@ export function scaleIngredient(line, factor = 1, system = 'original') {
       // scale an equivalent written in brackets too: "1 cup (120g)" → "2 cups (240g)"
       if (p.alt && UNITS[p.alt.unit].dim) {
         const au = UNITS[p.alt.unit];
-        const altText = `(${formatQty(p.alt.qty * factor, au.sys === 'metric')}${au.sys === 'metric' ? '' : ' '}${unitLabel(p.alt.unit, p.alt.qty * factor)})`;
+        const altText = `(${formatQty(p.alt.qty * factor, au.sys === 'metric')}${au.sys === 'metric' ? '' : ' '}${unitLabel(p.alt.unit, p.alt.qty * factor, ll)})`;
         name = name.replace(p.alt.raw, ' ' + altText);
       }
     }
@@ -267,8 +304,8 @@ export function scaleIngredient(line, factor = 1, system = 'original') {
   } else {
     dispDim = 'v';
     if (out.key === 'oz' || out.key === 'lb') dispDim = 'w';
-    amountText = `${formatQty(out.n)} ${unitLabel(out.key, out.n)}`;
-    if (ratio) amountText = `${formatQty(out.n)} – ${formatQty(out.n * ratio)} ${unitLabel(out.key, out.n * ratio)}`;
+    amountText = `${formatQty(out.n)} ${unitLabel(out.key, out.n, ll)}`;
+    if (ratio) amountText = `${formatQty(out.n)} – ${formatQty(out.n * ratio)} ${unitLabel(out.key, out.n * ratio, ll)}`;
     canonPerDisp = UNITS[out.key].f;
   }
   // canonical amount at scale 1, in the dimension being displayed
@@ -310,12 +347,12 @@ export function sectionName(line) {
 
 // ---------- Timers ----------
 
-const DUR_RE = /(\d+(?:[.,]\d+)?|an?|one|half an?)\s*(?:(?:-|–|to)\s*(\d+(?:[.,]\d+)?)\s*)?(hours?|hrs?|minutes?|mins?|seconds?|secs?)\b(?:\s*(?:and\s*)?(\d+)\s*(minutes?|mins?))?/gi;
+const DUR_RE = /(\d+(?:[.,]\d+)?|an?|one|half an?|una?|media)\s*(?:(?:-|–|to|a)\s*(\d+(?:[.,]\d+)?)\s*)?(hours?|hrs?|horas?|minutes?|minutos?|mins?|seconds?|segundos?|secs?|segs?)\b(?:\s*(?:(?:and|y)\s*)?(\d+)\s*(minutes?|minutos?|mins?))?/gi;
 
 function wordNum(w) {
   const s = w.toLowerCase().replace(',', '.');
-  if (s === 'a' || s === 'an' || s === 'one') return 1;
-  if (s.startsWith('half')) return 0.5;
+  if (s === 'a' || s === 'an' || s === 'one' || s === 'un' || s === 'una') return 1;
+  if (s.startsWith('half') || s === 'media') return 0.5;
   return Number(s);
 }
 
@@ -346,10 +383,11 @@ export function formatClock(sec) {
 
 export function formatDurationLabel(sec) {
   const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
-  if (h && m) return `${h} hr ${m} min`;
-  if (h) return `${h} hr`;
+  const hr = parserLang === 'es' ? 'h' : 'hr';
+  if (h && m) return `${h} ${hr} ${m} min`;
+  if (h) return `${h} ${hr}`;
   if (m) return `${m} min`;
-  return `${sec} sec`;
+  return `${sec} ${parserLang === 'es' ? 's' : 'sec'}`;
 }
 
 // ---------- Import from website HTML ----------
@@ -425,7 +463,7 @@ function flattenInstructions(inst) {
 }
 
 function stripStepNumber(s) {
-  return s.replace(/^(?:step\s*)?\d+\s*[.):-]\s*/i, '').trim();
+  return s.replace(/^(?:step|paso)?\s*\d+\s*[.):-]\s*/i, '').trim();
 }
 
 function pickImage(img) {
@@ -499,9 +537,9 @@ export function extractRecipeFromHtml(html, pageUrl = '') {
 
 // ---------- Import from pasted text ----------
 
-const ING_HEAD = /^\s*(ingredients?|you(?:'|’)ll need|what you need)\s*:?\s*$/i;
-const STEP_HEAD = /^\s*(instructions?|directions?|method|steps|preparation|how to make( it)?)\s*:?\s*$/i;
-const NOTE_HEAD = /^\s*(notes?|tips?|recipe notes?)\s*:?\s*$/i;
+const ING_HEAD = /^\s*(ingredients?|you(?:'|’)ll need|what you need|ingredientes|lo que necesitas|necesitas)\s*:?\s*$/i;
+const STEP_HEAD = /^\s*(instructions?|directions?|method|steps|preparation|how to make( it)?|instrucciones|preparaci[oó]n|procedimiento|modo de preparaci[oó]n|pasos|elaboraci[oó]n)\s*:?\s*$/i;
+const NOTE_HEAD = /^\s*(notes?|tips?|recipe notes?|notas?|consejos?)\s*:?\s*$/i;
 
 export function parsePastedRecipe(text) {
   const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/^[\s•*·▢☐-]+/, '').trim());

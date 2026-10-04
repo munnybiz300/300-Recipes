@@ -2,6 +2,7 @@
 // app is closed or the phone is locked; a notification fires when one ends.
 
 import { h, icon, confirmDialog, toast } from './ui.js';
+import { t as tr } from './i18n.js';
 import { formatClock } from './parser.js';
 import { scheduleTimerNotification, cancelTimerNotification, vibrate, beep } from './native.js';
 
@@ -18,7 +19,7 @@ function save() {
 
 export function startTimer({ label, seconds, key }) {
   const existing = timers.find((t) => t.key === key && t.state !== 'done');
-  if (existing) { toast('That timer is already running'); return; }
+  if (existing) { toast(tr('timerRunning')); return; }
   const t = { id: 'tm' + Date.now().toString(36), key, label, total: seconds, endAt: Date.now() + seconds * 1000, state: 'running' };
   timers.push(t);
   save();
@@ -46,10 +47,10 @@ function remove(t) {
 
 async function skip(t) {
   const ok = await confirmDialog({
-    title: 'Skip this timer?',
-    message: `"${t.label}" will stop and won't alert you. Handy if you're using your oven's timer instead.`,
-    ok: 'Skip timer',
-    cancel: 'Keep it',
+    title: tr('skipTimerQ'),
+    message: tr('skipTimerBody', t.label),
+    ok: tr('skipTimer'),
+    cancel: tr('keepIt'),
     danger: true,
   });
   if (ok) remove(t);
@@ -65,7 +66,7 @@ export function render() {
     if (t.state === 'running' && left <= 0) { t.state = 'ringing'; t.rangAt = Date.now(); save(); }
     const ringing = t.state === 'ringing';
     const pct = ringing ? 100 : 100 * (1 - left / t.total);
-    const clock = h('div', { class: 'clock' }, ringing ? 'Done!' : formatClock(left));
+    const clock = h('div', { class: 'clock' }, ringing ? tr('timerDone') : formatClock(left));
     const prog = h('div', { class: 'prog', style: { width: pct + '%' } });
     refs.set(t.id, { clock, prog });
     const el = h('div', { class: 'timer' + (t.state === 'paused' ? ' paused' : '') + (ringing ? ' ringing' : '') },
@@ -73,11 +74,11 @@ export function render() {
         clock,
         h('small', {}, t.label)),
       ringing
-        ? h('button', { onclick: () => remove(t) }, icon('check', 'sm'), 'Dismiss')
+        ? h('button', { onclick: () => remove(t) }, icon('check', 'sm'), tr('dismiss'))
         : [
-          h('button', { 'aria-label': t.state === 'paused' ? 'Resume' : 'Pause', onclick: () => (t.state === 'paused' ? resume(t) : pause(t)) },
+          h('button', { 'aria-label': t.state === 'paused' ? tr('resume') : tr('pause'), onclick: () => (t.state === 'paused' ? resume(t) : pause(t)) },
             icon(t.state === 'paused' ? 'play' : 'pause', 'sm')),
-          h('button', { onclick: () => skip(t) }, icon('skip', 'sm'), 'Skip'),
+          h('button', { onclick: () => skip(t) }, icon('skip', 'sm'), tr('skip')),
         ],
       prog,
     );

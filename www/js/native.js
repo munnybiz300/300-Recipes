@@ -5,26 +5,46 @@ const Cap = () => window.Capacitor;
 export const isNative = () => !!(Cap() && Cap().isNativePlatform && Cap().isNativePlatform());
 const plugin = (name) => (isNative() && Cap().Plugins ? Cap().Plugins[name] : null);
 
-const UA = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Mobile Safari/537.36';
+import { t } from './i18n.js';
+
+const UA_MOBILE = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36';
+const UA_DESKTOP = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
+const pageHeaders = (ua) => ({
+  'User-Agent': ua,
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9,es-MX;q=0.8,es;q=0.7',
+  'Cache-Control': 'no-cache',
+  'Upgrade-Insecure-Requests': '1',
+});
+
+export class SiteError extends Error {
+  constructor(status) { super(t('siteError', status)); this.status = status; }
+}
 
 // Native requests are not limited by browser cross-site rules, which is what
 // makes importing from any recipe website possible.
 export async function fetchText(url) {
   const http = plugin('CapacitorHttp');
   if (http) {
-    const res = await http.get({ url, headers: { 'User-Agent': UA, Accept: 'text/html,*/*' }, responseType: 'text' });
-    if (res.status >= 400) throw new Error(`The site answered with error ${res.status}.`);
-    return typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+    // Some sites turn away anything that doesn't look like a normal browser,
+    // so try as a phone browser first, then as a desktop browser.
+    let res;
+    for (const ua of [UA_MOBILE, UA_DESKTOP]) {
+      res = await http.get({ url, headers: pageHeaders(ua), responseType: 'text' });
+      if (res.status < 400) return typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+      if (![403, 401, 429, 503].includes(res.status)) break;
+    }
+    throw new SiteError(res.status);
   }
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`The site answered with error ${res.status}.`);
+  if (!res.ok) throw new SiteError(res.status);
   return res.text();
 }
 
 export async function fetchImageDataUrl(url) {
   const http = plugin('CapacitorHttp');
   if (http) {
-    const res = await http.get({ url, headers: { 'User-Agent': UA }, responseType: 'blob' });
+    const res = await http.get({ url, headers: { 'User-Agent': UA_MOBILE }, responseType: 'blob' });
     if (res.status >= 400) throw new Error('image ' + res.status);
     const type = (res.headers && (res.headers['Content-Type'] || res.headers['content-type'])) || 'image/jpeg';
     return `data:${type.split(';')[0]};base64,${res.data}`;
@@ -40,7 +60,7 @@ export async function saveFile(filename, text, mime = 'application/json') {
   const fs = plugin('Filesystem'), share = plugin('Share');
   if (fs && share) {
     const { uri } = await fs.writeFile({ path: filename, data: text, directory: 'CACHE', encoding: 'utf8' });
-    await share.share({ title: filename, files: [uri], url: uri, dialogTitle: 'Save your backup' });
+    await share.share({ title: filename, files: [uri], url: uri, dialogTitle: t('saveBackupTitle') });
     return;
   }
   const blob = new Blob([text], { type: mime });
@@ -72,7 +92,7 @@ export async function scheduleTimerNotification(timer) {
   if (!ln) return;
   try {
     await ln.schedule({ notifications: [{
-      id: notifId(timer.id), title: '⏰ Timer done', body: timer.label,
+      id: notifId(timer.id), title: t('timerNotifTitle'), body: timer.label,
       schedule: { at: new Date(timer.endAt), allowWhileIdle: true },
     }] });
   } catch { /* the in-app alarm still works */ }
@@ -124,4 +144,19 @@ export function beep() {
       o.start(now + t); o.stop(now + t + 0.2);
     });
   } catch { /* no audio */ }
+}
+
+// ---------- Android back button ----------
+export function onBackButton(handler) {
+  const app = plugin('App');
+  if (!app) return false;
+  app.addListener('backButton', handler);
+  return true;
+}
+export async function leaveApp() {
+  const app = plugin('App');
+  if (!app) return;
+  // Send the app to the background (like the home button) so running
+  // timers and the current screen are kept; fall back to closing it.
+  try { await app.minimizeApp(); } catch { try { await app.exitApp(); } catch { /* ignore */ } }
 }

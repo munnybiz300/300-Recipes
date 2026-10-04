@@ -323,3 +323,15 @@ body.has-timers .cook-nav { padding-bottom: calc(96px + var(--safe-bottom)); }
 /* ---------- Units toggle ---------- */
 .units-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); font-weight: 600; }
 .units-row .seg button { height: 30px; padding: 0 10px; font-size: 12.5px; }
+
+/* ---------- Sort menu ---------- */
+.sort-btn { display: inline-flex; align-items: center; gap: 4px; }
+.sort-btn .icon { width: 16px; height: 16px; }
+.option.sort-opt { justify-content: space-between; padding: 16px 18px; }
+.option.sort-opt.on { border-color: var(--accent); color: var(--accent); }
+.option.sort-opt .icon { color: var(--accent); stroke-width: 2.4; }
+
+/* ---------- Rotating caption examples ---------- */
+textarea.rotating::placeholder { transition: opacity .25s ease; opacity: 1; }
+textarea.rotating.ph-out::placeholder { opacity: 0; }
+.cook-cta, .fab { white-space: nowrap; }

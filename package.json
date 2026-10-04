@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@capacitor/android": "latest",
+    "@capacitor/app": "latest",
     "@capacitor/core": "latest",
     "@capacitor/filesystem": "latest",
     "@capacitor/local-notifications": "latest",

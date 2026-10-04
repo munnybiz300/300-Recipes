@@ -1,4 +1,14 @@
 // Small UI helpers: element builder, icons, dialogs, toasts, image handling.
+import { t, locale } from './i18n.js';
+
+// Safety net: never print the words "null"/"undefined"/"false" on screen when
+// an optional piece of a screen is left out.
+for (const proto of [Element.prototype, DocumentFragment.prototype]) {
+  for (const m of ['append', 'prepend']) {
+    const orig = proto[m];
+    proto[m] = function (...nodes) { return orig.apply(this, nodes.filter((n) => n != null && n !== false)); };
+  }
+}
 
 export function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -48,6 +58,8 @@ const PATHS = {
   note: '<path d="M5 4h14v12l-4 4H5z"/><path d="M15 20v-4h4M8 9h8M8 13h5"/>',
   reset: '<path d="M4 12a8 8 0 108-8 8 8 0 00-6.3 3"/><path d="M4 4v4h4"/>',
   scale: '<path d="M12 3v18M5 7h14M7 7l-3 7a3 3 0 006 0zM17 7l-3 7a3 3 0 006 0z"/>',
+  chevron: '<path d="M6 9l6 6 6-6"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>',
   more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
   heart: '<path d="M12 21l-1.4-1.3C5.4 15 2 11.9 2 8.1 2 5 4.4 2.5 7.5 2.5c1.7 0 3.4.8 4.5 2.1 1.1-1.3 2.8-2.1 4.5-2.1C19.6 2.5 22 5 22 8.1c0 3.8-3.4 6.9-8.6 11.6z"/>',
   star: '<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
@@ -60,38 +72,54 @@ export function icon(name, cls = '') {
 }
 
 // ---------- overlays ----------
+// Every popup, sheet and full-screen mode (cook mode) is an "overlay".
+// Each one adds a step to the back history. Pressing back (or closing it)
+// removes exactly one step, so only the top overlay closes — closing a
+// popup inside cook mode no longer closes cook mode too.
+
+const stack = []; // [{ depth, teardown }]
+const depthNow = () => (history.state && history.state.ovDepth) || 0;
+
+window.addEventListener('popstate', () => {
+  const d = depthNow();
+  while (stack.length && stack[stack.length - 1].depth > d) stack.pop().teardown();
+});
+
+export function pushOverlay(teardown) {
+  const depth = (stack.length ? stack[stack.length - 1].depth : depthNow()) + 1;
+  history.pushState({ ovDepth: depth }, '');
+  const o = { depth, teardown };
+  stack.push(o);
+  return {
+    close() {
+      if (!stack.includes(o)) return;
+      history.back(); // the popstate above runs teardown
+      // Safety net in case the browser never reports the back step
+      setTimeout(() => {
+        const i = stack.indexOf(o);
+        if (i !== -1) stack.splice(i).reverse().forEach((x) => x.teardown());
+      }, 700);
+    },
+  };
+}
+export const hasOverlay = () => stack.length > 0;
 
 export function openSheet(build, { center = false } = {}) {
   return new Promise((resolve) => {
     const scrim = h('div', { class: 'scrim' + (center ? ' center' : '') });
     const box = h('div', { class: center ? 'dialog' : 'sheet' });
     if (!center) box.append(h('div', { class: 'grab' }));
-    let done = false;
-    const close = (val) => {
-      if (done) return; done = true;
-      scrim.remove(); document.removeEventListener('keydown', onKey); window.removeEventListener('popstate', onPop);
-      resolve(val);
-    };
-    const onKey = (e) => { if (e.key === 'Escape') closeAndPop(undefined); };
-    // Android back button closes the sheet instead of leaving the screen
-    const onPop = () => close(undefined);
-    history.pushState({ sheet: true }, '');
-    window.addEventListener('popstate', onPop);
-    // Undo our history entry, and only resolve once the browser has finished
-    // going back, so a follow-up navigation isn't undone by it.
-    const closeAndPop = (val) => {
-      if (done) return;
-      window.removeEventListener('popstate', onPop);
+    let result;
+    const onKey = (e) => { if (e.key === 'Escape') close(undefined); };
+    const ov = pushOverlay(() => {
       scrim.remove();
-      let settled = false;
-      const finish = () => { if (settled) return; settled = true; window.removeEventListener('popstate', finish); close(val); };
-      window.addEventListener('popstate', finish);
-      setTimeout(finish, 400);
-      history.back();
-    };
-    scrim.addEventListener('click', (e) => { if (e.target === scrim) closeAndPop(undefined); });
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    });
+    const close = (val) => { result = val; scrim.style.display = 'none'; ov.close(); };
+    scrim.addEventListener('click', (e) => { if (e.target === scrim) close(undefined); });
     document.addEventListener('keydown', onKey);
-    build(box, closeAndPop);
+    build(box, close);
     scrim.append(box);
     document.body.append(scrim);
     const first = box.querySelector('input,textarea');
@@ -99,11 +127,11 @@ export function openSheet(build, { center = false } = {}) {
   });
 }
 
-export function confirmDialog({ title, message = '', ok = 'OK', cancel = 'Cancel', danger = false }) {
+export function confirmDialog({ title, message = '', ok = t('ok'), cancel = t('cancel'), danger = false }) {
   return openSheet((box, close) => {
+    box.append(h('h3', {}, title));
+    if (message) box.append(h('p', {}, message));
     box.append(
-      h('h3', {}, title),
-      message ? h('p', {}, message) : null,
       h('div', { class: 'actions' },
         h('button', { class: 'btn sm', onclick: () => close(false) }, cancel),
         h('button', { class: 'btn sm ' + (danger ? 'danger' : 'primary'), onclick: () => close(true) }, ok)),
@@ -111,20 +139,19 @@ export function confirmDialog({ title, message = '', ok = 'OK', cancel = 'Cancel
   }, { center: true }).then((v) => !!v);
 }
 
-export function promptDialog({ title, message = '', value = '', placeholder = '', ok = 'Save', multiline = false, inputmode }) {
+export function promptDialog({ title, message = '', value = '', placeholder = '', ok = t('save'), multiline = false, inputmode }) {
   return openSheet((box, close) => {
     const input = multiline
       ? h('textarea', { rows: 4, placeholder })
       : h('input', { type: 'text', placeholder, inputmode });
     input.value = value;
-    const wrap = h('div', { class: 'field' }, input);
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !multiline) close(input.value); });
+    box.append(h('h3', {}, title));
+    if (message) box.append(h('p', {}, message));
     box.append(
-      h('h3', {}, title),
-      message ? h('p', {}, message) : null,
-      wrap,
+      h('div', { class: 'field' }, input),
       h('div', { class: 'actions' },
-        h('button', { class: 'btn sm', onclick: () => close(undefined) }, 'Cancel'),
+        h('button', { class: 'btn sm', onclick: () => close(undefined) }, t('cancel')),
         h('button', { class: 'btn sm primary', onclick: () => close(input.value) }, ok)),
     );
   }, { center: true });
@@ -170,5 +197,5 @@ export async function resizeImage(srcOrFile, max = 1600, quality = 0.84) {
 }
 
 export function fmtDate(ts) {
-  return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return new Date(ts).toLocaleDateString(locale(), { month: 'short', day: 'numeric', year: 'numeric' });
 }
