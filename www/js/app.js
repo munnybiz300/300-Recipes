@@ -5,7 +5,7 @@ import {
 } from './ui.js';
 import {
   scaleIngredient, parseIngredient, formatQty, isSection, sectionName, findDurations,
-  formatDurationLabel, extractRecipeFromHtml, parsePastedRecipe, factorFromUsed, setParserLang,
+  formatDurationLabel, recipeMinutes, extractRecipeFromHtml, parsePastedRecipe, factorFromUsed, setParserLang,
 } from './parser.js';
 import { fetchText, fetchImageDataUrl, saveFile, keepAwake, onBackButton, leaveApp, SiteError } from './native.js';
 import { initTimers, startTimer, render as renderTimers } from './timers.js';
@@ -20,7 +20,7 @@ const SORTS = ['new', 'old', 'az', 'za', 'rated'];
 const CSORTS = ['az', 'za', 'new', 'old', 'count'];
 const BIN_DAYS = 30;
 const DAY = 864e5;
-const homeState = { query: '', tags: [], fav: false, sort: SORTS.includes(localStorage.getItem('sort')) ? localStorage.getItem('sort') : 'new' };
+const homeState = { query: '', tags: [], fav: false, top: false, quick: false, fresh: false, sort: SORTS.includes(localStorage.getItem('sort')) ? localStorage.getItem('sort') : 'new' };
 let collSort = CSORTS.includes(localStorage.getItem('csort')) ? localStorage.getItem('csort') : 'az';
 const scaleState = new Map(); // recipeId -> { factor, note }
 const tabState = new Map();   // recipeId -> tab name
@@ -151,6 +151,19 @@ function matches(r, q, tagFilter) {
   });
 }
 
+const QUICK_MINUTES = 30;
+const anyFilter = () => !!(homeState.query.trim() || homeState.tags.length || homeState.fav || homeState.top || homeState.quick || homeState.fresh);
+function resetFilters() { homeState.tags = []; homeState.query = ''; homeState.fav = homeState.top = homeState.quick = homeState.fresh = false; }
+
+// The quick filters: favorites, 4★ and up, 30 minutes or less, not made yet
+function passesQuick(r) {
+  if (homeState.fav && !r.favorite) return false;
+  if (homeState.top) { const { avg } = ratingInfo(r); if (avg == null || avg < 4) return false; }
+  if (homeState.quick) { const m = recipeMinutes(r); if (m == null || m > QUICK_MINUTES) return false; }
+  if (homeState.fresh && ratingInfo(r).made > 0) return false;
+  return true;
+}
+
 function sortList(list) {
   const byTitle = (a, b) => (a.title || '').localeCompare(b.title || '', locale(), { sensitivity: 'base' });
   if (homeState.sort === 'rated') {
@@ -180,6 +193,7 @@ function renderHome() {
   const sortRow = h('div', { class: 'sort-row' });
   const grid = h('div', { class: 'grid' });
   const empty = h('div');
+  const timeHint = h('p', { class: 'hint hidden', style: { padding: '8px 20px 0', margin: 0 } });
 
   input.addEventListener('input', () => { homeState.query = input.value; update(); });
 
@@ -192,6 +206,16 @@ function renderHome() {
         class: 'chip fav-chip' + (homeState.fav ? ' on' : ''),
         onclick: () => { homeState.fav = !homeState.fav; update(); },
       }, icon('heart', 'sm'), t('favorites')));
+    }
+    // quick filters: 4★ and up, 30 minutes or less, not made yet
+    if (recipes.length) {
+      const q = (key, ic, label, cls = '') => chips.append(h('button', {
+        class: 'chip q-chip ' + cls + (homeState[key] ? ' on' : ''), 'aria-pressed': homeState[key] ? 'true' : 'false',
+        onclick: () => { homeState[key] = !homeState[key]; update(); },
+      }, icon(ic, 'sm'), label));
+      q('top', 'star', t('fTop'), 'star');
+      q('quick', 'timer', t('fQuick'));
+      q('fresh', 'pot', t('fFresh'));
     }
     // then selected tags, then tags matching the search text, then the rest
     const q = homeState.query.trim().toLowerCase().replace(/^#/, '');
@@ -211,13 +235,17 @@ function renderHome() {
     }
     chips.classList.toggle('hidden', !chips.children.length);
 
-    const list = sortList(recipes.filter((r) => (!homeState.fav || r.favorite) && matches(r, homeState.query, homeState.tags)));
+    const list = sortList(recipes.filter((r) => passesQuick(r) && matches(r, homeState.query, homeState.tags)));
 
     sortRow.innerHTML = '';
     sortRow.append(
-      h('span', {}, homeState.query || homeState.tags.length || homeState.fav ? t('matches', list.length) : ''),
+      h('span', {}, anyFilter() ? t('matches', list.length) : ''),
       h('button', { class: 'sort-btn', onclick: () => openRecipeSort(update) }, t('sort_' + homeState.sort), icon('chevron', 'sm')));
     sortRow.classList.toggle('hidden', !recipes.length);
+
+    const noTime = homeState.quick ? recipes.filter((r) => recipeMinutes(r) == null).length : 0;
+    timeHint.textContent = noTime ? t('noTimeHint', noTime) : '';
+    timeHint.classList.toggle('hidden', !noTime);
 
     grid.innerHTML = '';
     empty.innerHTML = '';
@@ -230,13 +258,13 @@ function renderHome() {
     }
     if (!list.length) {
       empty.append(h('div', { class: 'empty' }, h('h3', {}, t('nothingFound')),
-        h('p', {}, homeState.fav && !homeState.query && !homeState.tags.length ? t('noFavsYet') : t('tryDifferent'))));
+        h('p', {}, homeState.fav && !homeState.query && !homeState.tags.length && !homeState.top && !homeState.quick && !homeState.fresh ? t('noFavsYet') : t('tryDifferent'))));
       return;
     }
     for (const r of list) grid.append(card(r));
   }
 
-  s.append(head, search, chips, sortRow, grid, empty);
+  s.append(head, search, chips, sortRow, timeHint, grid, empty);
   // Fixed buttons live outside the animated screen so they don't jump on arrival
   app.append(h('button', { class: 'fab', onclick: openAddSheet }, icon('plus'), t('addRecipe')), bottomNav('recipes'));
   update();
@@ -650,7 +678,7 @@ function tagsRow(r) {
   function draw() {
     row.innerHTML = '';
     for (const tg of r.tags || []) {
-      row.append(h('button', { class: 'tag', onclick: () => { homeState.tags = [tg]; homeState.query = ''; homeState.fav = false; go('#/'); } }, tg));
+      row.append(h('button', { class: 'tag', onclick: () => { resetFilters(); homeState.tags = [tg]; go('#/'); } }, tg));
     }
     row.append(h('button', { class: 'tag add', onclick: () => addTagsSheet(r, draw) }, icon('plus', 'sm'), (r.tags || []).length ? t('tag') : t('addTags')));
   }

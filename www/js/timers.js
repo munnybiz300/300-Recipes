@@ -4,10 +4,9 @@
 import { h, icon, confirmDialog, toast } from './ui.js';
 import { t as tr } from './i18n.js';
 import { formatClock } from './parser.js';
-import { scheduleTimerNotification, cancelTimerNotification, vibrate, beep } from './native.js';
+import { scheduleTimerNotification, cancelTimerNotification, vibrate, alarmTick, stopAlarm } from './native.js';
 
 let timers = load();
-let ringTick = null;
 const refs = new Map(); // timer id -> { clock, prog }
 
 function load() {
@@ -42,6 +41,7 @@ function resume(t) {
 }
 function remove(t) {
   timers = timers.filter((x) => x !== t);
+  if (!timers.some((x) => x.state === 'ringing')) stopAlarm();
   cancelTimerNotification(t); save(); render();
 }
 
@@ -88,11 +88,9 @@ export function render() {
 }
 
 function tick() {
-  let anyRinging = false;
   let changed = false;
   for (const t of timers) {
     if (t.state === 'running' && remaining(t) <= 0) { t.state = 'ringing'; t.rangAt = Date.now(); changed = true; }
-    if (t.state === 'ringing') anyRinging = true;
   }
   if (changed) { save(); render(); }
   for (const t of timers) {
@@ -102,12 +100,10 @@ function tick() {
     r.clock.textContent = formatClock(left);
     r.prog.style.width = 100 * (1 - left / t.total) + '%';
   }
-  if (anyRinging) {
-    // Chime every 2 seconds for up to a minute
-    const now = Date.now();
-    const recent = timers.some((t) => t.state === 'ringing' && now - (t.rangAt || now) < 60000);
-    if (recent && (!ringTick || now - ringTick > 2000)) { ringTick = now; beep(); vibrate([300, 150, 300]); }
-  }
+  // The town tune loops (5 s per play) for up to a minute, or until dismissed
+  const now = Date.now();
+  const recent = timers.some((t) => t.state === 'ringing' && now - (t.rangAt || now) < 60000);
+  if (recent) { if (alarmTick()) vibrate([300, 150, 300]); } else stopAlarm();
 }
 
 export function initTimers() {

@@ -112,3 +112,20 @@ tools.
 | `www/js/timers.js` | Step timers |
 | `assets/` | App icon and splash screen |
 | `.github/workflows/build-apk.yml` | The cloud build |
+
+---
+
+## Updating the app without losing recipes
+
+Every build is signed with the key in the `signing` folder and gets a higher
+version number than the one before, so a new APK installs **over** the old app
+and everything is kept. Never uninstall first: uninstalling deletes the recipes.
+
+- In the build's log (Actions tab → the run → "Check the signature") you will see
+  two lines, `Project key` and `APK signed`. They must match. If they don't, the
+  build stops with a red X and nothing is published.
+- If Android ever says the app **conflicts with an existing package**, don't
+  uninstall yet. Open the old app first: **Settings → Save a backup**. Then
+  uninstall, install the new APK, and use **Settings → Restore from backup**.
+- Keep the `signing` folder and the repository safe (and private). Losing the key
+  means future builds can't update installed copies.

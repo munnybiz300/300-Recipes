@@ -256,6 +256,10 @@ const STRINGS = {
     emptyBin: 'Empty bin',
     emptyBinQ: (n) => `Delete ${n} recipe${n === 1 ? '' : 's'} forever?`,
     binEmptied: 'Bin emptied',
+    fTop: '4★ & up',
+    fQuick: '30 min or less',
+    fFresh: 'Not made yet',
+    noTimeHint: (n) => `${n} recipe${n === 1 ? ' has' : 's have'} no prep or cook time, so ${n === 1 ? "it isn't" : "they aren't"} included.`,
     cantUndo: "This can't be undone.",
 
   },
@@ -514,6 +518,10 @@ const STRINGS = {
     emptyBin: 'Vaciar papelera',
     emptyBinQ: (n) => `¿Borrar ${n} receta${n === 1 ? '' : 's'} definitivamente?`,
     binEmptied: 'Papelera vaciada',
+    fTop: '4★ o más',
+    fQuick: '30 min o menos',
+    fFresh: 'Sin hacer aún',
+    noTimeHint: (n) => `${n} receta${n === 1 ? ' no tiene' : 's no tienen'} tiempo de preparación ni de cocción, así que no se incluye${n === 1 ? '' : 'n'}.`,
     cantUndo: 'No se puede deshacer.',
 
   },

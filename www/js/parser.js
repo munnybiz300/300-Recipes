@@ -374,6 +374,25 @@ export function findDurations(text) {
   return out;
 }
 
+// Reads a recipe time field like "25 min", "1 hr 10 min", "1 hora y 15 minutos" or just "30"
+// and returns minutes (or null if it's empty or unreadable).
+export function minutesFromText(text) {
+  const str = String(text == null ? '' : text).trim();
+  if (!str) return null;
+  const found = findDurations(str);
+  if (found.length) return found.reduce((a, d) => a + d.seconds, 0) / 60;
+  const bare = str.match(/^(\d+(?:[.,]\d+)?)$/);        // a lone number counts as minutes
+  return bare ? Number(bare[1].replace(',', '.')) : null;
+}
+
+// Total time for a recipe in minutes: the "total" field, else prep + cook. null if unknown.
+export function recipeMinutes(r) {
+  const total = minutesFromText(r.totalTime);
+  if (total != null) return total;
+  const prep = minutesFromText(r.prepTime), cook = minutesFromText(r.cookTime);
+  return prep == null && cook == null ? null : (prep || 0) + (cook || 0);
+}
+
 export function formatClock(sec) {
   sec = Math.max(0, Math.ceil(sec));
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;

@@ -129,21 +129,91 @@ export function vibrate(pattern) {
   try { navigator.vibrate && navigator.vibrate(pattern); } catch { /* ignore */ }
 }
 
-let audioCtx;
-export function beep() {
+// ---------- Timer alarm: the town tune ----------
+// 16 equal slots of 0.3125 s = exactly 5 s per play, then it loops.
+//   letter = note for one slot    x = rest    - = hold the previous note one more slot
+//   ? = a random note of the C major scale, picked fresh on every play
+// The last "x" is the pause before the next play. Same sound as the old
+// 3-note chime (soft sine "pluck"), in the C5–B5 octave.
+export const TUNE = 'E G C E D B G F E x ? x C - - x'.split(' ');
+export const SLOT = 0.3125;
+export const TUNE_SECONDS = TUNE.length * SLOT; // 5
+const SCALE = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+const SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+const C5 = 523.2511306011972;
+export const noteFreq = (n) => C5 * Math.pow(2, SEMITONES[n] / 12);
+
+// Turns the tune into notes: [{ note, freq, start, dur }] (times in seconds from the start)
+export function buildTune(rand = Math.random) {
+  const out = [];
+  TUNE.forEach((tok, slot) => {
+    if (tok === 'x') return;
+    if (tok === '-') { if (out.length) out[out.length - 1].dur += SLOT; return; }
+    const note = tok === '?' ? SCALE[Math.floor(rand() * SCALE.length)] : tok;
+    out.push({ note, freq: noteFreq(note), start: slot * SLOT, dur: SLOT });
+  });
+  return out;
+}
+
+// Schedules one play of the tune on an audio context, starting at `at` (audio-clock seconds).
+export function scheduleTune(ctx, dest, at, rand = Math.random, oscs) {
+  const notes = buildTune(rand);
+  for (const n of notes) {
+    const t0 = at + n.start;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = n.freq;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.02);        // same quick attack as before
+    if (n.dur > SLOT + 1e-6) {                                    // held note: gentle sustain, then fade
+      g.gain.exponentialRampToValueAtTime(0.14, t0 + n.dur * 0.6);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.dur - 0.02);
+    } else {
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);     // same pluck as before
+    }
+    o.connect(g).connect(dest);
+    o.start(t0); o.stop(t0 + Math.max(0.2, n.dur));
+    if (oscs) { oscs.add(o); o.onended = () => oscs.delete(o); }
+  }
+  return notes;
+}
+
+let audioCtx, alarm = null;
+
+// Call about once a second while a timer is ringing. Schedules each play ahead of time
+// on the audio clock, so the 5-second loop never drifts or stutters.
+// Returns true when a new play of the tune has just been scheduled to start.
+export function alarmTick() {
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
     const now = audioCtx.currentTime;
-    [0, 0.22, 0.44].forEach((t, i) => {
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      o.type = 'sine'; o.frequency.value = i === 2 ? 1175 : 880;
-      g.gain.setValueAtTime(0.0001, now + t);
-      g.gain.exponentialRampToValueAtTime(0.35, now + t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + t + 0.18);
-      o.connect(g).connect(audioCtx.destination);
-      o.start(now + t); o.stop(now + t + 0.2);
-    });
-  } catch { /* no audio */ }
+    if (!alarm) {
+      const master = audioCtx.createGain();
+      master.connect(audioCtx.destination);
+      alarm = { master, oscs: new Set(), next: now + 0.05 };
+    }
+    if (alarm.next < now - 0.5) alarm.next = now + 0.05; // woke up late: restart cleanly
+    let started = false;
+    while (alarm.next < now + 1.5) {
+      scheduleTune(audioCtx, alarm.master, alarm.next, Math.random, alarm.oscs);
+      alarm.next += TUNE_SECONDS;
+      started = true;
+    }
+    return started;
+  } catch { return false; /* no audio */ }
+}
+
+// Silences the alarm right away, including notes already queued.
+export function stopAlarm() {
+  if (!alarm) return;
+  const a = alarm; alarm = null;
+  try {
+    const now = audioCtx.currentTime;
+    a.master.gain.cancelScheduledValues(now);
+    a.master.gain.setValueAtTime(0, now);
+    a.oscs.forEach((o) => { try { o.stop(now); } catch { /* already stopped */ } });
+    setTimeout(() => { try { a.master.disconnect(); } catch { /* ignore */ } }, 200);
+  } catch { /* ignore */ }
 }
 
 // ---------- Android back button ----------
