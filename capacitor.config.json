@@ -1,0 +1,8 @@
+{
+  "appId": "com.personal.threehundredrecipes",
+  "appName": "300 Recipes",
+  "webDir": "www",
+  "android": {
+    "backgroundColor": "#f5efe5"
+  }
+}

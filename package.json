@@ -1,0 +1,23 @@
+{
+  "name": "300-recipes",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A personal recipe organizer: tags, search, website import, smart scaling, cook mode.",
+  "scripts": {
+    "preview": "npx --yes http-server www -p 8080 -c-1",
+    "sync": "npx cap sync android",
+    "icons": "npx capacitor-assets generate --android",
+    "open": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "latest",
+    "@capacitor/core": "latest",
+    "@capacitor/filesystem": "latest",
+    "@capacitor/local-notifications": "latest",
+    "@capacitor/share": "latest"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "latest",
+    "@capacitor/cli": "latest"
+  }
+}
