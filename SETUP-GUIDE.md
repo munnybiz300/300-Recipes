@@ -129,3 +129,11 @@ and everything is kept. Never uninstall first: uninstalling deletes the recipes.
   uninstall, install the new APK, and use **Settings → Restore from backup**.
 - Keep the `signing` folder and the repository safe (and private). Losing the key
   means future builds can't update installed copies.
+
+## The timer alarm
+
+The alarm plays the Animal Crossing town tune on the phone's **alarm volume**
+(Settings → Sound → Alarm volume), not the media volume. It loops for up to a
+minute, or until you tap Dismiss. If a build ever shows a yellow warning
+"The native alarm did not compile", the app still works, but the alarm falls
+back to the media volume until that is fixed.

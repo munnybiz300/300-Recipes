@@ -15,6 +15,9 @@ copy /Y "signing\debug.keystore" "%USERPROFILE%\.android\debug.keystore" >nul
 echo Copying the latest app files into the Android project...
 call npx cap sync android || goto :fail
 
+REM Native alarm (plays on the phone's alarm volume)
+copy /Y "native\android\*.java" "android\app\src\main\java\com\personal\threehundredrecipes\" >nul
+
 echo Building the APK (the first time takes several minutes)...
 pushd android
 call gradlew.bat assembleDebug || (popd & goto :fail)

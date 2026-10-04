@@ -131,17 +131,22 @@ export function vibrate(pattern) {
 
 // ---------- Timer alarm: the town tune ----------
 // 16 equal slots of 0.3125 s = exactly 5 s per play, then it loops.
-//   letter = note for one slot    x = rest    - = hold the previous note one more slot
+//   note + octave = a note for one slot    x = rest    - = hold the previous note one more slot
 //   ? = a random note of the C major scale, picked fresh on every play
-// The last "x" is the pause before the next play. Same sound as the old
-// 3-note chime (soft sine "pluck"), in the C5–B5 octave.
-export const TUNE = 'E G C E D B G F E x ? x C - - x'.split(' ');
+// The last "x" is the pause before the next play. Heights follow the in-game tune:
+// it rises (E G C E), peaks on the high E, then falls (D B G F E) and ends on a held high C.
+// Same soft sine "pluck" as the old 3-note chime.
+export const TUNE = 'E4 G4 C5 E5 D5 B4 G4 F4 E4 x ? x C5 - - x'.split(' ');
 export const SLOT = 0.3125;
 export const TUNE_SECONDS = TUNE.length * SLOT; // 5
-const SCALE = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+// The 7 notes of C major that sit inside the tune's own range (E4 up to D5): what "?" can be
+export const RANDOM_POOL = ['E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5'];
+const OCTAVE_SHIFT = 1; // played one octave above the in-game height so it carries on a phone speaker
 const SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
-const C5 = 523.2511306011972;
-export const noteFreq = (n) => C5 * Math.pow(2, SEMITONES[n] / 12);
+export function noteFreq(name) { // e.g. 'E4'
+  const oct = Number(name.slice(1)) + OCTAVE_SHIFT;
+  return 261.6255653005986 * Math.pow(2, (SEMITONES[name[0]] + 12 * (oct - 4)) / 12);
+}
 
 // Turns the tune into notes: [{ note, freq, start, dur }] (times in seconds from the start)
 export function buildTune(rand = Math.random) {
@@ -149,13 +154,13 @@ export function buildTune(rand = Math.random) {
   TUNE.forEach((tok, slot) => {
     if (tok === 'x') return;
     if (tok === '-') { if (out.length) out[out.length - 1].dur += SLOT; return; }
-    const note = tok === '?' ? SCALE[Math.floor(rand() * SCALE.length)] : tok;
+    const note = tok === '?' ? RANDOM_POOL[Math.floor(rand() * RANDOM_POOL.length)] : tok;
     out.push({ note, freq: noteFreq(note), start: slot * SLOT, dur: SLOT });
   });
   return out;
 }
 
-// Schedules one play of the tune on an audio context, starting at `at` (audio-clock seconds).
+// Schedules one play of the tune on a Web Audio context, starting at `at` (audio-clock seconds).
 export function scheduleTune(ctx, dest, at, rand = Math.random, oscs) {
   const notes = buildTune(rand);
   for (const n of notes) {
@@ -177,17 +182,39 @@ export function scheduleTune(ctx, dest, at, rand = Math.random, oscs) {
   return notes;
 }
 
-let audioCtx, alarm = null;
+// Two ways to play it:
+//  1. Inside the APK: a tiny native plugin plays it on Android's ALARM volume (not media volume).
+//  2. Anywhere else (or if the plugin isn't there): Web Audio, which follows media volume.
+const PLAYS = 12; // 12 x 5 s = the one-minute cap
+let audioCtx, alarm = null, nativeBroken = false;
 
-// Call about once a second while a timer is ringing. Schedules each play ahead of time
-// on the audio clock, so the 5-second loop never drifts or stutters.
-// Returns true when a new play of the tune has just been scheduled to start.
+// Call about once a second while a timer is ringing.
+// Returns true when a new play of the tune is starting (used for the vibration).
 export function alarmTick() {
+  const nat = nativeBroken ? null : plugin('Alarm');
+  return nat ? nativeTick(nat) : webTick();
+}
+
+function nativeTick(nat) {
+  const now = Date.now();
+  if (!alarm) {
+    alarm = { native: true, nextPlay: now + TUNE_SECONDS * 1000 };
+    // Each play gets its own random "?" note; the plugin just plays what it is given
+    const plays = Array.from({ length: PLAYS }, () => buildTune().map((n) => ({ f: n.freq, s: n.start, d: n.dur })));
+    Promise.resolve(nat.play({ plays })).catch(() => { nativeBroken = true; alarm = null; }); // fall back to Web Audio
+    return true;
+  }
+  if (alarm.native && now >= alarm.nextPlay) { alarm.nextPlay += TUNE_SECONDS * 1000; return true; }
+  return false;
+}
+
+// Web Audio: each play is scheduled ahead on the audio clock, so the 5-second loop never drifts.
+function webTick() {
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
     const now = audioCtx.currentTime;
-    if (!alarm) {
+    if (!alarm || alarm.native) {
       const master = audioCtx.createGain();
       master.connect(audioCtx.destination);
       alarm = { master, oscs: new Set(), next: now + 0.05 };
@@ -207,6 +234,10 @@ export function alarmTick() {
 export function stopAlarm() {
   if (!alarm) return;
   const a = alarm; alarm = null;
+  if (a.native) {
+    try { const nat = plugin('Alarm'); if (nat) Promise.resolve(nat.stop()).catch(() => {}); } catch { /* ignore */ }
+    return;
+  }
   try {
     const now = audioCtx.currentTime;
     a.master.gain.cancelScheduledValues(now);
