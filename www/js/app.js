@@ -542,7 +542,9 @@ function importFromText() {
     const p = parsePastedRecipe(text);
     pendingDraft = {
       title: p.title === 'Untitled recipe' ? t('untitled') : p.title,
-      ingredients: p.ingredients, steps: p.steps, tags: [], newPhotos: [],
+      ingredients: p.ingredients, steps: p.steps, tags: p.tags || [], newPhotos: [],
+      servings: p.servings || null, yieldText: p.yieldText || '',
+      prepTime: p.prepTime || '', cookTime: p.cookTime || '', totalTime: p.totalTime || '',
       notes: p.notes ? [{ id: db.uid(), date: Date.now(), text: p.notes }] : [],
     };
     go('#/new');
@@ -760,9 +762,26 @@ function ingredientsPanel(panel, r) {
     panel.append(scaler, h('p', { class: 'hint' }, t('usedHint')));
   }
 
+  // Recipes with parts (e.g. cookie + frosting) show a heading per part with a live "2 of 6" count
   const list = h('ul', { class: 'list' });
+  const secs = [];
+  let curSec = null;
   r.ingredients.forEach((line, i) => {
-    if (isSection(line)) { list.append(h('li', { class: 'sec' }, sectionName(line))); return; }
+    if (isSection(line)) { curSec = { i, items: [], el: h('span', { class: 'sec-n' }) }; secs.push(curSec); } else if (curSec) curSec.items.push(i);
+  });
+  const updateCounts = () => {
+    const c = getChecks(r.id);
+    for (const sc of secs) {
+      const n = sc.items.length, done = sc.items.filter((x) => c.i.includes(x)).length;
+      sc.el.textContent = !n ? '' : done === n ? '✓ ' + t('secProgress', done, n) : done ? t('secProgress', done, n) : t('secItems', n);
+      sc.el.classList.toggle('all', n > 0 && done === n);
+    }
+  };
+  r.ingredients.forEach((line, i) => {
+    if (isSection(line)) {
+      list.append(h('li', { class: 'sec' }, h('span', { class: 'sec-name' }, sectionName(line)), secs.find((x) => x.i === i).el));
+      return;
+    }
     const p = scaleIngredient(line, sc.factor, unitSystem);
     const done = checks.i.includes(i);
     const txt = h('div', { class: 'txt' }, ingredientText(p, line));
@@ -772,10 +791,11 @@ function ingredientsPanel(panel, r) {
     li.addEventListener('click', () => {
       const c = getChecks(r.id);
       c.i = c.i.includes(i) ? c.i.filter((x) => x !== i) : [...c.i, i];
-      setChecks(r.id, c); li.classList.toggle('done');
+      setChecks(r.id, c); li.classList.toggle('done'); updateCounts();
     });
     list.append(li);
   });
+  updateCounts();
   if (!r.ingredients.length) list.append(h('p', { class: 'hint' }, t('noIngredients')));
   panel.append(list, resetChecksBtn(r, 'i', panel, () => ingredientsPanel(panel, r)));
 }
@@ -833,7 +853,7 @@ function stepsPanel(panel, r) {
   const checks = getChecks(r.id);
   const list = h('ol', { class: 'list' });
   for (const st of numberedSteps(r)) {
-    if (st.head) { list.append(h('li', { class: 'sec' }, st.text)); continue; }
+    if (st.head) { list.append(h('li', { class: 'sec' }, h('span', { class: 'sec-name' }, st.text))); continue; }
     const done = checks.s.includes(st.i);
     const li = h('li', { class: 'item' + (done ? ' done' : '') },
       h('span', { class: 'step-num' }, st.num), h('div', { class: 'txt' }, stepText(st.text, r, st.num - 1)));
@@ -1113,7 +1133,7 @@ function openCookMode(r) {
   function showIngredients() {
     const list = h('ul', { class: 'list' });
     r.ingredients.forEach((line, i) => {
-      if (isSection(line)) { list.append(h('li', { class: 'sec' }, sectionName(line))); return; }
+      if (isSection(line)) { list.append(h('li', { class: 'sec' }, h('span', { class: 'sec-name' }, sectionName(line)))); return; }
       const p = scaleIngredient(line, sc.factor, unitSystem);
       const li = h('li', { class: 'item' + (getChecks(r.id).i.includes(i) ? ' done' : '') }, h('span', { class: 'check' }, icon('check')),
         h('div', { class: 'txt' }, ingredientText(p, line)));
@@ -1269,6 +1289,23 @@ async function renderEditor(id) {
 
   const lines = (ta) => ta.value.split('\n').map((l) => l.trim()).filter(Boolean);
 
+  // "+ Section heading": adds a "# Section name" line where the cursor is and selects the name to type over
+  function secButton(ta) {
+    return h('div', { class: 'ta-tools' }, h('button', { type: 'button', class: 'chip sec-add', onclick: () => {
+      const v = ta.value, name = t('sectionName');
+      const pos = ta.selectionStart == null ? v.length : ta.selectionStart;
+      const lineStart = v.lastIndexOf('\n', pos - 1) + 1;
+      let at, text;
+      if (pos === lineStart) { at = pos; text = '# ' + name + (v.slice(pos) ? '\n' : ''); }   // start of a line: insert above it
+      else { const end = v.indexOf('\n', pos); at = end === -1 ? v.length : end; text = '\n# ' + name; } // mid-line: insert below it
+      ta.value = v.slice(0, at) + text + v.slice(at);
+      const start = at + text.indexOf(name);
+      ta.focus();
+      ta.setSelectionRange(start, start + name.length);
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    } }, icon('plus', 'sm'), t('addSection')));
+  }
+
   async function save() {
     if (tagInput.value.trim()) addTag(tagInput.value);
     d.title = title.value; d.tags = tags;
@@ -1298,8 +1335,8 @@ async function renderEditor(id) {
     h('div', { class: 'field' }, h('label', {}, t('tags')), tagBox, suggest),
     h('div', { class: 'row2' }, field(t('servings'), servings), field(t('makesOptional'), yieldText)),
     h('div', { class: 'row3' }, field(t('prep'), prep), field(t('cook'), cook), field(t('total'), total)),
-    field(t('ingredients'), ings, t('ingredientsHelp')),
-    field(t('steps'), steps, t('stepsHelp')),
+    field(t('ingredients'), [ings, secButton(ings)], t('ingredientsHelp')),
+    field(t('steps'), [steps, secButton(steps)], t('stepsHelp')),
     existing ? h('div', { class: 'editor-actions' },
       h('button', { class: 'btn primary block', onclick: async () => {
         if (dirty && !(await confirmDialog({ title: t('duplicateUnsavedQ'), message: t('duplicateUnsavedBody'), ok: t('duplicate') }))) return;

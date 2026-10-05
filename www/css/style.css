@@ -430,3 +430,14 @@ body.has-nav #timers { padding-bottom: calc(84px + var(--safe-bottom)); }
 .q-chip .icon { color: var(--accent); }
 .q-chip.star .icon { fill: currentColor; }
 .q-chip.on .icon { color: var(--bg); }
+
+/* ---------- Ingredient / step sections ---------- */
+.list .sec { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; padding: 28px 0 9px; border-bottom: 1.5px solid color-mix(in srgb, var(--ink) 75%, transparent); font-family: var(--sans); font-size: inherit; font-weight: 400; }
+.list .sec:first-child { padding-top: 8px; }
+.list .sec .sec-name { font-family: var(--serif); font-weight: 600; font-size: 20px; line-height: 1.15; letter-spacing: -.01em; }
+.list .sec .sec-n { flex: none; font-size: 12.5px; font-weight: 600; color: var(--muted); padding-bottom: 2px; }
+.list .sec .sec-n.all { color: var(--done); }
+.cook-ings .list .sec .sec-name { font-size: 22px; }
+.ta-tools { display: flex; gap: 8px; margin-top: 8px; }
+.chip.sec-add { height: 32px; font-size: 13px; color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.chip.sec-add .icon { color: var(--accent); }

@@ -4,7 +4,7 @@
 import { h, icon, confirmDialog, toast } from './ui.js';
 import { t as tr } from './i18n.js';
 import { formatClock } from './parser.js';
-import { scheduleTimerNotification, cancelTimerNotification, vibrate, alarmTick, stopAlarm } from './native.js';
+import { scheduleTimerNotification, cancelTimerNotification, vibrate, alarmTick, stopAlarm, ALARM } from './native.js';
 
 let timers = load();
 const refs = new Map(); // timer id -> { clock, prog }
@@ -100,9 +100,9 @@ function tick() {
     r.clock.textContent = formatClock(left);
     r.prog.style.width = 100 * (1 - left / t.total) + '%';
   }
-  // The town tune loops (5 s per play) for up to a minute, or until dismissed
+  // The town tune loops for up to ALARM.maxRingSeconds, or until dismissed
   const now = Date.now();
-  const recent = timers.some((t) => t.state === 'ringing' && now - (t.rangAt || now) < 60000);
+  const recent = timers.some((t) => t.state === 'ringing' && now - (t.rangAt || now) < ALARM.maxRingSeconds * 1000);
   if (recent) { if (alarmTick()) vibrate([300, 150, 300]); } else stopAlarm();
 }
 

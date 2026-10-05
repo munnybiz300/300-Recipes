@@ -130,54 +130,91 @@ export function vibrate(pattern) {
 }
 
 // ---------- Timer alarm: the town tune ----------
-// 16 equal slots of 0.3125 s = exactly 5 s per play, then it loops.
-//   note + octave = a note for one slot    x = rest    - = hold the previous note one more slot
-//   ? = a random note of the C major scale, picked fresh on every play
-// The last "x" is the pause before the next play. Heights follow the in-game tune:
-// it rises (E G C E), peaks on the high E, then falls (D B G F E) and ends on a held high C.
-// Same soft sine "pluck" as the old 3-note chime.
-export const TUNE = 'E4 G4 C5 E5 D5 B4 G4 F4 E4 x ? x C5 - - x'.split(' ');
-export const SLOT = 0.3125;
-export const TUNE_SECONDS = TUNE.length * SLOT; // 5
-// The 7 notes of C major that sit inside the tune's own range (E4 up to D5): what "?" can be
-export const RANDOM_POOL = ['E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5'];
-const OCTAVE_SHIFT = 1; // played one octave above the in-game height so it carries on a phone speaker
+// ===================== ALARM SETTINGS: tweak the timing here =====================
+export const ALARM = {
+  slotSeconds: 0.3125,     // length of one slot. 16 slots = one play (0.3125 x 16 = 5 s)
+  extraPauseSeconds: 0,    // extra silence after slot 16, before the tune repeats (0 = none)
+  maxRingSeconds: 60,      // keeps looping this long unless you tap Dismiss
+  volume: 0.95,            // loudness of each note, 0 to 1 (1 = the most the phone allows)
+  brightness: 0,           // 0 = pure tone (as requested). If it's ever too quiet over a mixer, try 0.3:
+                           // adds a soft layer an octave up that phone speakers play louder; same notes.
+};
+// ================================================================================
+
+// The tune, one entry per slot (scientific pitch: middle C = C4).
+//   'x' = rest   '-' = hold the previous note (no new attack)   '?' = random note (see RANDOM_POOL)
+export const TUNE = [
+  'E4', //  1  low E
+  'G4', //  2
+  'C5', //  3
+  'E5', //  4  high E
+  'D5', //  5
+  'B4', //  6
+  'G4', //  7
+  'F4', //  8
+  'E4', //  9  low E
+  'x',  // 10  rest
+  '?',  // 11  random note
+  'x',  // 12  rest
+  'C5', // 13  C starts
+  '-',  // 14  hold C
+  '-',  // 15  hold C
+  'x',  // 16  rest = the gap before the next play
+];
+// "?" picks one of these, fresh on every play: the C major notes from low E to high E
+export const RANDOM_POOL = ['E4', 'F4', 'G4', 'A4', 'B4', 'C5', 'D5', 'E5'];
+
+export const playSeconds = (cfg = ALARM) => TUNE.length * cfg.slotSeconds + cfg.extraPauseSeconds;
+export const TUNE_SECONDS = playSeconds(); // 5 with the settings above
+
 const SEMITONES = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
-export function noteFreq(name) { // e.g. 'E4'
-  const oct = Number(name.slice(1)) + OCTAVE_SHIFT;
+export function noteFreq(name) { // 'E4' -> 329.63 Hz, exact equal temperament (A4 = 440 Hz)
+  const oct = Number(name.slice(1));
   return 261.6255653005986 * Math.pow(2, (SEMITONES[name[0]] + 12 * (oct - 4)) / 12);
 }
 
-// Turns the tune into notes: [{ note, freq, start, dur }] (times in seconds from the start)
-export function buildTune(rand = Math.random) {
+// Turns the tune into notes: [{ note, freq, start, dur }] (seconds from the start of a play)
+export function buildTune(rand = Math.random, cfg = ALARM) {
   const out = [];
   TUNE.forEach((tok, slot) => {
     if (tok === 'x') return;
-    if (tok === '-') { if (out.length) out[out.length - 1].dur += SLOT; return; }
+    if (tok === '-') { if (out.length) out[out.length - 1].dur += cfg.slotSeconds; return; }
     const note = tok === '?' ? RANDOM_POOL[Math.floor(rand() * RANDOM_POOL.length)] : tok;
-    out.push({ note, freq: noteFreq(note), start: slot * SLOT, dur: SLOT });
+    out.push({ note, freq: noteFreq(note), start: slot * cfg.slotSeconds, dur: cfg.slotSeconds });
   });
   return out;
 }
 
+// The sound: the same pure sine tone as before, but each note now rings for its whole slot
+// instead of a short ping, which is what makes it much louder without changing the pitch.
+// (The Android player in native/android/TuneSynth.java uses this exact same shape.)
+export const ENVELOPE = {
+  attack: 0.012,   // seconds to reach full strength
+  release: 0.03,   // seconds to fade out at the end of the note (avoids clicks)
+  ring: 1.14,      // gentle fade while ringing: about 30% quieter by the end of one slot
+};
+
 // Schedules one play of the tune on a Web Audio context, starting at `at` (audio-clock seconds).
-export function scheduleTune(ctx, dest, at, rand = Math.random, oscs) {
-  const notes = buildTune(rand);
+export function scheduleTune(ctx, dest, at, rand = Math.random, oscs, cfg = ALARM) {
+  const notes = buildTune(rand, cfg);
+  const peak = Math.max(0.0002, Math.min(1, cfg.volume));
   for (const n of notes) {
-    const t0 = at + n.start;
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = 'sine'; o.frequency.value = n.freq;
+    const t0 = at + n.start, rel = Math.min(ENVELOPE.release, n.dur * 0.3);
+    const g = ctx.createGain();
+    const bright = Math.max(0, cfg.brightness || 0);
+    const layers = bright ? [[n.freq, 1 / (1 + bright)], [n.freq * 2, bright / (1 + bright)]] : [[n.freq, 1]];
     g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.02);        // same quick attack as before
-    if (n.dur > SLOT + 1e-6) {                                    // held note: gentle sustain, then fade
-      g.gain.exponentialRampToValueAtTime(0.14, t0 + n.dur * 0.6);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.dur - 0.02);
-    } else {
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);     // same pluck as before
+    g.gain.exponentialRampToValueAtTime(peak, t0 + ENVELOPE.attack);
+    g.gain.exponentialRampToValueAtTime(peak * Math.exp(-ENVELOPE.ring * (n.dur - rel)), t0 + n.dur - rel);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.dur);
+    g.connect(dest);
+    for (const [freq, level] of layers) {
+      const o = ctx.createOscillator(), lv = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = freq; lv.gain.value = level;
+      o.connect(lv).connect(g);
+      o.start(t0); o.stop(t0 + n.dur + 0.005);
+      if (oscs) { oscs.add(o); o.onended = () => oscs.delete(o); }
     }
-    o.connect(g).connect(dest);
-    o.start(t0); o.stop(t0 + Math.max(0.2, n.dur));
-    if (oscs) { oscs.add(o); o.onended = () => oscs.delete(o); }
   }
   return notes;
 }
@@ -185,7 +222,6 @@ export function scheduleTune(ctx, dest, at, rand = Math.random, oscs) {
 // Two ways to play it:
 //  1. Inside the APK: a tiny native plugin plays it on Android's ALARM volume (not media volume).
 //  2. Anywhere else (or if the plugin isn't there): Web Audio, which follows media volume.
-const PLAYS = 12; // 12 x 5 s = the one-minute cap
 let audioCtx, alarm = null, nativeBroken = false;
 
 // Call about once a second while a timer is ringing.
@@ -198,13 +234,16 @@ export function alarmTick() {
 function nativeTick(nat) {
   const now = Date.now();
   if (!alarm) {
-    alarm = { native: true, nextPlay: now + TUNE_SECONDS * 1000 };
+    const len = playSeconds();
+    alarm = { native: true, len, nextPlay: now + len * 1000 };
     // Each play gets its own random "?" note; the plugin just plays what it is given
-    const plays = Array.from({ length: PLAYS }, () => buildTune().map((n) => ({ f: n.freq, s: n.start, d: n.dur })));
-    Promise.resolve(nat.play({ plays })).catch(() => { nativeBroken = true; alarm = null; }); // fall back to Web Audio
+    const count = Math.max(1, Math.ceil(ALARM.maxRingSeconds / len));
+    const plays = Array.from({ length: count }, () => buildTune().map((n) => ({ f: n.freq, s: n.start, d: n.dur })));
+    Promise.resolve(nat.play({ plays, playSeconds: len, peak: ALARM.volume, brightness: ALARM.brightness || 0, attack: ENVELOPE.attack, release: ENVELOPE.release, ring: ENVELOPE.ring }))
+      .catch(() => { nativeBroken = true; alarm = null; }); // fall back to Web Audio
     return true;
   }
-  if (alarm.native && now >= alarm.nextPlay) { alarm.nextPlay += TUNE_SECONDS * 1000; return true; }
+  if (alarm.native && now >= alarm.nextPlay) { alarm.nextPlay += alarm.len * 1000; return true; }
   return false;
 }
 
@@ -223,7 +262,7 @@ function webTick() {
     let started = false;
     while (alarm.next < now + 1.5) {
       scheduleTune(audioCtx, alarm.master, alarm.next, Math.random, alarm.oscs);
-      alarm.next += TUNE_SECONDS;
+      alarm.next += playSeconds();
       started = true;
     }
     return started;

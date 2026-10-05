@@ -20,8 +20,6 @@ import org.json.JSONObject;
  */
 @CapacitorPlugin(name = "Alarm")
 public class AlarmPlugin extends Plugin {
-    private static final double PEAK = 0.85;
-
     private static final class Play {
         double[] f, s, d;
     }
@@ -35,6 +33,16 @@ public class AlarmPlugin extends Plugin {
         JSArray plays = call.getArray("plays");
         if (plays == null || plays.length() == 0) {
             call.reject("No tune given");
+            return;
+        }
+        final double seconds = call.getDouble("playSeconds", 5.0);
+        final double peak = call.getDouble("peak", 0.95);
+        final double brightness = call.getDouble("brightness", 0.0);
+        final double attack = call.getDouble("attack", 0.012);
+        final double release = call.getDouble("release", 0.03);
+        final double ring = call.getDouble("ring", 1.14);
+        if (!(seconds > 0.5 && seconds < 60)) {
+            call.reject("Bad play length");
             return;
         }
         try {
@@ -53,7 +61,7 @@ public class AlarmPlugin extends Plugin {
                 }
                 list[p] = pl;
             }
-            start(list);
+            start(list, seconds, peak, brightness, attack, release, ring);
             call.resolve();
         } catch (Exception e) {
             call.reject("Could not start the alarm: " + e.getMessage());
@@ -71,7 +79,8 @@ public class AlarmPlugin extends Plugin {
         halt();
     }
 
-    private void start(final Play[] list) {
+    private void start(final Play[] list, final double seconds, final double peak, final double brightness,
+                       final double attack, final double release, final double ring) {
         halt();
         int min = AudioTrack.getMinBufferSize(
                 TuneSynth.RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
@@ -99,7 +108,7 @@ public class AlarmPlugin extends Plugin {
                     t.play();
                     for (Play p : list) {
                         if (!running || track != t) break;
-                        short[] pcm = TuneSynth.render(p.f, p.s, p.d, 5.0, PEAK);
+                        short[] pcm = TuneSynth.render(p.f, p.s, p.d, seconds, peak, brightness, attack, release, ring);
                         int off = 0;
                         while (running && track == t && off < pcm.length) {
                             int n = t.write(pcm, off, Math.min(4096, pcm.length - off));

@@ -134,6 +134,40 @@ and everything is kept. Never uninstall first: uninstalling deletes the recipes.
 
 The alarm plays the Animal Crossing town tune on the phone's **alarm volume**
 (Settings → Sound → Alarm volume), not the media volume. It loops for up to a
-minute, or until you tap Dismiss. If a build ever shows a yellow warning
+minute, or until you tap Dismiss.
+
+**Tweaking it:** all the alarm settings are in one block at the top of
+`www/js/native.js` (look for `ALARM SETTINGS`): slot length, an extra pause
+between repeats, how long it rings, volume, and brightness. The notes themselves
+are listed right below it, one line per slot. You can edit that file directly on
+GitHub (open it, click the pencil, change a number, commit); the new APK builds
+automatically. If a build ever shows a yellow warning
 "The native alarm did not compile", the app still works, but the alarm falls
 back to the media volume until that is fixed.
+
+## Adding recipes from a bot (paste format)
+
+**Add recipe → Paste recipe text** reads this layout. Everything except the title,
+ingredients and directions is optional; leave a line out if it isn't known.
+
+```
+Recipe Title
+Prep time: 15 min
+Cook time: 25 min
+Total time: 40 min
+Servings: 4
+Tags: Dinner, Chicken
+
+Ingredients
+2 cups all-purpose flour
+1 tsp salt
+# Sauce
+1 cup tomato puree
+
+Directions
+Preheat the oven to 400°F.
+Mix the flour and salt.
+```
+
+Lines starting with `#` inside a list make a heading (like "Sauce"). Spanish labels
+(Tiempo de preparación, Rinde, Ingredientes, Instrucciones…) work too.

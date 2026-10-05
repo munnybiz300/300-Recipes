@@ -514,6 +514,84 @@ function splitKeywords(k) {
   return list.map((s) => cleanText(s)).filter(Boolean);
 }
 
+// ---------- Ingredient / step groups ("# Frosting") ----------
+
+const FOR_THE = /^(?:for\s+(?:the\s+)?|para\s+(?:el|la|los|las)\s+)/i;
+
+// "For the frosting:" -> "Frosting"
+export function groupName(text) {
+  const n = cleanText(text).replace(/^#+\s*/, '').replace(/[:：]\s*$/, '').replace(FOR_THE, '').trim();
+  return n ? n[0].toUpperCase() + n.slice(1) : '';
+}
+
+// Does a line look like a group label rather than an ingredient or step?
+//   "Frosting:"  "For the glaze"  "Para el betún:"   (not "2 cups flour", not "For garnish: parsley")
+export function looksLikeGroup(line) {
+  const s = String(line || '').trim();
+  if (!s || s.length > 40 || /^#/.test(s)) return false;
+  if (/^[\d½¼¾⅓⅔⅛⅜⅝⅞]/.test(s)) return false;     // starts with an amount
+  if (/:\s*\S/.test(s)) return false;                  // "Label: something" is a full line
+  if (/[:：]\s*$/.test(s)) return s.replace(/[:：]\s*$/, '').trim().split(/\s+/).length <= 5;
+  return FOR_THE.test(s) && s.split(/\s+/).length <= 5 && !/[,.;!?]/.test(s);
+}
+
+// Many sites drop ingredient groups from their recipe data but still show them on the page.
+// Read the group names and sizes from the page, e.g. [{ name: '', count: 6 }, { name: 'Frosting', count: 3 }].
+function ingredientGroupsFromHtml(html, expected) {
+  if (typeof DOMParser === 'undefined' || !expected) return null;
+  let doc;
+  try { doc = new DOMParser().parseFromString(html, 'text/html'); } catch { return null; }
+  const HEADING_CLASS = /(group|section|list)[-_]*(name|title|heading)|subheading|heading/i;
+  const containers = doc.querySelectorAll([
+    '.wprm-recipe-ingredients-container', '.tasty-recipes-ingredients', '.mv-create-ingredients',
+    '.mntl-structured-ingredients', '.recipe-ingredients', '[class*="ingredients"]',
+  ].join(','));
+  for (const c of containers) {
+    const groups = [];
+    let cur = { name: '', count: 0 };
+    const walk = (el) => {
+      for (const ch of el.children) {
+        const tag = ch.tagName;
+        const cls = typeof ch.className === 'string' ? ch.className : '';
+        const onlyStrong = tag === 'P' && ch.children.length === 1 && ch.firstElementChild.tagName === 'STRONG'
+          && ch.textContent.trim() === ch.firstElementChild.textContent.trim();
+        if (tag !== 'LI' && (/^H[2-6]$/.test(tag) || HEADING_CLASS.test(cls) || onlyStrong)) {
+          const name = groupName(ch.textContent);
+          if (name && !ING_HEAD.test(name)) {
+            if (cur.count || cur.name) groups.push(cur);
+            cur = { name, count: 0 };
+          }
+          continue;
+        }
+        if (tag === 'LI') { cur.count++; continue; }
+        walk(ch);
+      }
+    };
+    walk(c);
+    if (cur.count || cur.name) groups.push(cur);
+    const filled = groups.filter((g) => g.count);
+    const total = filled.reduce((a, g) => a + g.count, 0);
+    if (filled.length >= 2 && filled.some((g) => g.name) && total === expected) return filled;
+  }
+  return null;
+}
+
+function addIngredientGroups(ingredients, html) {
+  // Some sites put the labels right in the list ("For the frosting:"): turn those into headings
+  let out = ingredients.map((l) => (looksLikeGroup(l) ? '# ' + groupName(l) : l));
+  if (out.some(isSection)) return out;
+  const groups = ingredientGroupsFromHtml(html, out.length);
+  if (!groups) return out;
+  const res = [];
+  let k = 0;
+  for (const g of groups) {
+    if (g.name) res.push('# ' + g.name);
+    res.push(...out.slice(k, k + g.count));
+    k += g.count;
+  }
+  return res;
+}
+
 export function extractRecipeFromHtml(html, pageUrl = '') {
   const scripts = [];
   const re = /<script[^>]*type\s*=\s*["']?application\/ld\+json["']?[^>]*>([\s\S]*?)<\/script>/gi;
@@ -542,7 +620,7 @@ export function extractRecipeFromHtml(html, pageUrl = '') {
 
   return {
     title: cleanText(recipe.name) || 'Untitled recipe',
-    ingredients: asArray(recipe.recipeIngredient || recipe.ingredients).map(cleanText).filter(Boolean),
+    ingredients: addIngredientGroups(asArray(recipe.recipeIngredient || recipe.ingredients).map(cleanText).filter(Boolean), html),
     steps: flattenInstructions(recipe.recipeInstructions),
     servings,
     yieldText,
@@ -560,20 +638,63 @@ const ING_HEAD = /^\s*(ingredients?|you(?:'|’)ll need|what you need|ingredient
 const STEP_HEAD = /^\s*(instructions?|directions?|method|steps|preparation|how to make( it)?|instrucciones|preparaci[oó]n|procedimiento|modo de preparaci[oó]n|pasos|elaboraci[oó]n)\s*:?\s*$/i;
 const NOTE_HEAD = /^\s*(notes?|tips?|recipe notes?|notas?|consejos?)\s*:?\s*$/i;
 
+// Lines like "Prep time: 15 min" or "Servings: 4" (English or Spanish). Time lines only count
+// when the value really is a time, so a step such as "Cook: stir until thick" is left alone.
+const META = [
+  ['prepTime', /^(?:prep(?:aration)?\s*time|prep|tiempo de preparaci[oó]n|tiempo de prep)\s*[:\-–]\s*(.+)$/i],
+  ['cookTime', /^(?:cook(?:ing)?\s*time|cook|tiempo de cocci[oó]n|cocci[oó]n)\s*[:\-–]\s*(.+)$/i],
+  ['totalTime', /^(?:total\s*time|total|tiempo total)\s*[:\-–]\s*(.+)$/i],
+  ['servings', /^(?:servings?|serves|yield|makes|porciones|rinde|raciones|rendimiento)\s*[:\-–]\s*(\d.*)$/i],
+  ['tags', /^(?:tags?|etiquetas?)\s*:\s*(.+)$/i],
+];
+const TITLE_LABEL = /^(?:title|recipe(?: name)?|t[ií]tulo|nombre(?: de la receta)?)\s*:\s*/i;
+
+function readMeta(line) {
+  for (const [key, re] of META) {
+    const m = line.match(re);
+    if (!m) continue;
+    const value = m[1].trim();
+    if (key === 'tags') {
+      const tags = [...new Set(value.split(/[,;]/).map((x) => x.replace(/^#/, '').trim()).filter(Boolean))].slice(0, 8);
+      return tags.length ? { key, value: tags } : null;
+    }
+    if (key === 'servings') {
+      const n = parseFloat(value.replace(',', '.'));
+      return n > 0 ? { key, value: { servings: n, text: /^\d+(?:[.,]\d+)?$/.test(value) ? '' : value } } : null;
+    }
+    // a time line starts with an amount ("15 min", "about 1 hour", "una hora"), not a sentence that mentions one
+    const startsWithAmount = /^(?:about|approximately|approx\.?|around|aprox\.?|unos|~|≈)?\s*(?:\d|an?\b|one\b|half\b|media\b|una?\b)/i.test(value);
+    return startsWithAmount && minutesFromText(value) != null ? { key, value } : null;
+  }
+  return null;
+}
+
 export function parsePastedRecipe(text) {
-  const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/^[\s•*·▢☐-]+/, '').trim());
-  const result = { title: '', ingredients: [], steps: [], notes: '' };
+  const lines = String(text || '').split(/\r?\n/).map((l) => l.replace(/\*\*|__|`/g, '').replace(/^[\s•*·▢☐-]+/, '').trim());
+  const result = { title: '', ingredients: [], steps: [], notes: '', prepTime: '', cookTime: '', totalTime: '', servings: null, yieldText: '', tags: [] };
   let mode = 'title';
   let sawHeader = false;
   for (const line of lines) {
     if (!line) continue;
-    if (ING_HEAD.test(line)) { mode = 'ing'; sawHeader = true; continue; }
-    if (STEP_HEAD.test(line)) { mode = 'steps'; sawHeader = true; continue; }
-    if (NOTE_HEAD.test(line)) { mode = 'notes'; sawHeader = true; continue; }
+    const meta = readMeta(line);
+    if (meta) {
+      if (meta.key === 'servings') { result.servings = meta.value.servings; result.yieldText = meta.value.text; }
+      else result[meta.key] = meta.value;
+      continue;
+    }
+    // "## Ingredients" works like "Ingredients"; other "# Name" lines stay as section headings
+    const bare = line.replace(/^#+\s*/, '');
+    if (ING_HEAD.test(bare)) { mode = 'ing'; sawHeader = true; continue; }
+    if (STEP_HEAD.test(bare)) { mode = 'steps'; sawHeader = true; continue; }
+    if (NOTE_HEAD.test(bare)) { mode = 'notes'; sawHeader = true; continue; }
     if (mode === 'title') {
-      if (!result.title) { result.title = line; continue; }
+      if (!result.title) { result.title = line.replace(/^#+\s*/, '').replace(TITLE_LABEL, '').trim(); continue; }
       if (sawHeader) continue;
       mode = 'guess';
+    }
+    if ((mode === 'ing' || mode === 'steps') && looksLikeGroup(line)) {
+      (mode === 'ing' ? result.ingredients : result.steps).push('# ' + groupName(line));
+      continue;
     }
     if (mode === 'ing') result.ingredients.push(line);
     else if (mode === 'steps') result.steps.push(stripStepNumber(line));

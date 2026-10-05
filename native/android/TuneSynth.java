@@ -1,22 +1,25 @@
 package com.personal.threehundredrecipes;
 
 /**
- * Renders one play of the alarm tune as 16-bit mono PCM: a soft sine "pluck", the same sound
- * the in-app (Web Audio) version makes. Pure Java, no Android classes, so it can be tested anywhere.
+ * Renders one play of the alarm tune as 16-bit mono PCM: a pure sine tone where each note
+ * rings for its whole slot (quick attack, gentle fade, short release). Same shape as the
+ * Web Audio version in www/js/native.js; the app sends the shape values, so the settings
+ * there are the only place to change it. Pure Java, so it can be tested anywhere.
  */
 final class TuneSynth {
     static final int RATE = 22050;
-    private static final double SLOT = 0.3125;
-    private static final double LOW = 0.0001 / 0.35;   // "silence" level, relative to the peak
-    private static final double SUSTAIN = 0.14 / 0.35; // level a held note settles at
+    private static final double LOW = 0.0001; // "silence" level, same as the Web Audio version
 
     private TuneSynth() {}
 
     /** freq[i] Hz, start[i] and dur[i] in seconds. The result is exactly `seconds` long. */
-    static short[] render(double[] freq, double[] start, double[] dur, double seconds, double peak) {
+    static short[] render(double[] freq, double[] start, double[] dur, double seconds,
+                          double peak, double brightness, double attack, double release, double ring) {
         int total = (int) Math.round(seconds * RATE);
         float[] mix = new float[total];
-        for (int n = 0; n < freq.length; n++) addNote(mix, freq[n], start[n], dur[n], peak);
+        double p = Math.max(0.0002, Math.min(1.0, peak));
+        double b = Math.max(0.0, brightness);
+        for (int n = 0; n < freq.length; n++) addNote(mix, freq[n], start[n], dur[n], p, b, attack, release, ring);
         short[] out = new short[total];
         for (int i = 0; i < total; i++) {
             double v = Math.max(-1.0, Math.min(1.0, mix[i]));
@@ -25,26 +28,28 @@ final class TuneSynth {
         return out;
     }
 
-    private static void addNote(float[] mix, double freq, double start, double dur, double peak) {
+    private static void addNote(float[] mix, double freq, double start, double dur, double peak,
+                                double bright, double attack, double release, double ring) {
         int from = (int) Math.round(start * RATE);
-        int to = Math.min(mix.length, (int) Math.round((start + Math.max(0.2, dur)) * RATE));
+        int to = Math.min(mix.length, (int) Math.round((start + dur) * RATE));
         for (int i = Math.max(0, from); i < to; i++) {
             double t = (i - from) / (double) RATE;
-            mix[i] += (float) (Math.sin(2.0 * Math.PI * freq * t) * gain(t, dur) * peak);
+            double w = 2.0 * Math.PI * freq * t;
+            // brightness 0 = pure sine; above 0 mixes in a soft layer one octave up (same total level)
+            double tone = (Math.sin(w) + bright * Math.sin(2.0 * w)) / (1.0 + bright);
+            mix[i] += (float) (tone * gain(t, dur, peak, attack, release, ring));
         }
     }
 
-    /** Volume at time t (seconds since the note began), same shape as the Web Audio version. */
-    static double gain(double t, double dur) {
-        if (t < 0.02) return seg(LOW, 1.0, t, 0.0, 0.02);                       // quick attack
-        if (dur > SLOT + 1e-6) {                                                  // held note
-            double mid = dur * 0.6, end = dur - 0.02;
-            if (t < mid) return seg(1.0, SUSTAIN, t, 0.02, mid);
-            if (t < end) return seg(SUSTAIN, LOW, t, mid, end);
-            return LOW;
-        }
-        if (t < 0.18) return seg(1.0, LOW, t, 0.02, 0.18);                      // short pluck
-        return LOW;
+    /** Volume at time t (seconds since the note began). */
+    static double gain(double t, double dur, double peak, double attack, double release, double ring) {
+        double rel = Math.min(release, dur * 0.3);
+        double end = dur - rel;
+        double endLevel = peak * Math.exp(-ring * (dur - rel));
+        if (t < attack) return seg(LOW, peak, t, 0.0, attack);       // quick attack
+        if (t < end) return seg(peak, endLevel, t, attack, end);      // rings, fading gently
+        if (t < dur) return seg(endLevel, LOW, t, end, dur);          // short release, no click
+        return 0.0;
     }
 
     private static double seg(double g0, double g1, double t, double ta, double tb) {
