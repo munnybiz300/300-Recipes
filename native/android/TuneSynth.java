@@ -1,10 +1,11 @@
 package com.personal.threehundredrecipes;
 
 /**
- * Renders one play of the alarm tune as 16-bit mono PCM: a pure sine tone where each note
- * rings for its whole slot (quick attack, gentle fade, short release). Same shape as the
- * Web Audio version in www/js/native.js; the app sends the shape values, so the settings
- * there are the only place to change it. Pure Java, so it can be tested anywhere.
+ * Renders one play of the alarm tune as 16-bit mono PCM. Each note is a few "partials"
+ * (the note's pitch times 1, 2, 3...), each with its own strike, gentle fade and short release:
+ * the same shape the Web Audio version in www/js/native.js draws. The app sends the
+ * instrument (already leveled so nothing clips), so the settings there are the only place
+ * to change it. Pure Java, so it can be tested anywhere.
  */
 final class TuneSynth {
     static final int RATE = 22050;
@@ -12,44 +13,41 @@ final class TuneSynth {
 
     private TuneSynth() {}
 
-    /** freq[i] Hz, start[i] and dur[i] in seconds. The result is exactly `seconds` long. */
+    /**
+     * freq[i] Hz, start[i] and dur[i] in seconds. partials[k] = { pitch multiple, amplitude, fade per second }.
+     * The result is exactly `seconds` long.
+     */
     static short[] render(double[] freq, double[] start, double[] dur, double seconds,
-                          double peak, double brightness, double attack, double release, double ring) {
+                          double[][] partials, double attack, double release) {
         int total = (int) Math.round(seconds * RATE);
         float[] mix = new float[total];
-        double p = Math.max(0.0002, Math.min(1.0, peak));
-        double b = Math.max(0.0, brightness);
-        for (int n = 0; n < freq.length; n++) addNote(mix, freq[n], start[n], dur[n], p, b, attack, release, ring);
+        for (int n = 0; n < freq.length; n++) {
+            for (double[] p : partials) addPartial(mix, freq[n] * p[0], start[n], dur[n], p[1], p[2], attack, release);
+        }
         short[] out = new short[total];
         for (int i = 0; i < total; i++) {
-            double v = Math.max(-1.0, Math.min(1.0, mix[i]));
+            double v = Math.max(-1.0, Math.min(1.0, mix[i])); // safety only: the app levels it to stay below 1
             out[i] = (short) Math.round(v * 32767.0);
         }
         return out;
     }
 
-    private static void addNote(float[] mix, double freq, double start, double dur, double peak,
-                                double bright, double attack, double release, double ring) {
+    private static void addPartial(float[] mix, double freq, double start, double dur, double amp,
+                                   double fade, double attack, double release) {
+        if (amp <= LOW) return;
         int from = (int) Math.round(start * RATE);
         int to = Math.min(mix.length, (int) Math.round((start + dur) * RATE));
-        for (int i = Math.max(0, from); i < to; i++) {
-            double t = (i - from) / (double) RATE;
-            double w = 2.0 * Math.PI * freq * t;
-            // brightness 0 = pure sine; above 0 mixes in a soft layer one octave up (same total level)
-            double tone = (Math.sin(w) + bright * Math.sin(2.0 * w)) / (1.0 + bright);
-            mix[i] += (float) (tone * gain(t, dur, peak, attack, release, ring));
-        }
-    }
-
-    /** Volume at time t (seconds since the note began). */
-    static double gain(double t, double dur, double peak, double attack, double release, double ring) {
         double rel = Math.min(release, dur * 0.3);
         double end = dur - rel;
-        double endLevel = peak * Math.exp(-ring * (dur - rel));
-        if (t < attack) return seg(LOW, peak, t, 0.0, attack);       // quick attack
-        if (t < end) return seg(peak, endLevel, t, attack, end);      // rings, fading gently
-        if (t < dur) return seg(endLevel, LOW, t, end, dur);          // short release, no click
-        return 0.0;
+        double endLevel = Math.max(LOW * 2, amp * Math.exp(-fade * (end - attack)));
+        for (int i = Math.max(0, from); i < to; i++) {
+            double t = (i - from) / (double) RATE;
+            double g;
+            if (t < attack) g = seg(LOW, amp, t, 0.0, attack);           // strike
+            else if (t < end) g = seg(amp, endLevel, t, attack, end);    // ring, fading gently
+            else g = seg(endLevel, LOW, t, end, dur);                    // release, no click
+            mix[i] += (float) (Math.sin(2.0 * Math.PI * freq * t) * g);
+        }
     }
 
     private static double seg(double g0, double g1, double t, double ta, double tb) {

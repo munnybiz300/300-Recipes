@@ -135,9 +135,8 @@ export const ALARM = {
   slotSeconds: 0.3125,     // length of one slot. 16 slots = one play (0.3125 x 16 = 5 s)
   extraPauseSeconds: 0,    // extra silence after slot 16, before the tune repeats (0 = none)
   maxRingSeconds: 60,      // keeps looping this long unless you tap Dismiss
-  volume: 0.95,            // loudness of each note, 0 to 1 (1 = the most the phone allows)
-  brightness: 0,           // 0 = pure tone (as requested). If it's ever too quiet over a mixer, try 0.3:
-                           // adds a soft layer an octave up that phone speakers play louder; same notes.
+  volume: 0.95,            // loudness, 0 to 1 (1 = the most the phone allows)
+  instrument: 'musicBox',  // 'musicBox' | 'chime' | 'softOrgan' | 'pure'  (see INSTRUMENTS below)
 };
 // ================================================================================
 
@@ -185,33 +184,62 @@ export function buildTune(rand = Math.random, cfg = ALARM) {
   return out;
 }
 
-// The sound: the same pure sine tone as before, but each note now rings for its whole slot
-// instead of a short ping, which is what makes it much louder without changing the pitch.
-// (The Android player in native/android/TuneSynth.java uses this exact same shape.)
-export const ENVELOPE = {
-  attack: 0.012,   // seconds to reach full strength
-  release: 0.03,   // seconds to fade out at the end of the note (avoids clicks)
-  ring: 1.14,      // gentle fade while ringing: about 30% quieter by the end of one slot
+// ---------- Instruments ----------
+// Each instrument is a few "partials": [pitch multiple, amount, fade per second].
+// Phone speakers can't push much air at low pitches; a pure tone puts everything there and
+// tears when it's loud. Spreading the sound over overtones (2x, 3x, 4x the note) keeps the
+// same notes and pitch but lets the tiny speaker play it louder without straining.
+export const INSTRUMENTS = {
+  chime:     { attack: 0.010, partials: [[1, .16, 1.6], [2, .22, 2.2], [3, .26, 3.0], [4, .24, 3.8], [5, .16, 5.0], [6, .12, 6.0]] },
+  musicBox:  { attack: 0.005, partials: [[1, .18, 2.0], [2, .18, 2.8], [3, .18, 3.6], [5.4, .26, 5.0], [8.9, .18, 7.5]] },
+  softOrgan: { attack: 0.012, partials: [[1, .16, 0.8], [2, .22, 1.0], [3, .26, 1.2], [4, .22, 1.4], [5, .14, 1.6]] },
+  pure:      { attack: 0.012, partials: [[1, 1, 1.14]] },   // the plain tone (can tear on phone speakers when loud)
 };
+export const ENVELOPE = { release: 0.03 };   // seconds to fade out at the end of each note (avoids clicks)
+const LOW = 0.0001;
+
+// Partials scaled so the loudest moment of any note the tune can play lands exactly on ALARM.volume.
+// Notes always start in the same phase, so this worst case can be computed exactly; nothing ever clips.
+const levelCache = new Map();
+export function instrumentPartials(cfg = ALARM) {
+  const inst = INSTRUMENTS[cfg.instrument] || INSTRUMENTS.musicBox;
+  const key = (cfg.instrument || 'musicBox') + '|' + cfg.volume;
+  if (!levelCache.has(key)) {
+    const sr = 48000, len = Math.round(0.35 * sr); // fine steps so even high overtones are measured precisely
+    const pitches = [...new Set([...TUNE.filter((x) => /^[A-G]\d$/.test(x)), ...RANDOM_POOL])].map(noteFreq);
+    let peak = 0;
+    for (const fr of pitches) {
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        let y = 0;
+        for (const [r, a, d] of inst.partials) {
+          const g = t < inst.attack ? LOW * Math.pow(a / LOW, t / inst.attack) : a * Math.exp(-d * (t - inst.attack));
+          y += Math.sin(2 * Math.PI * fr * r * t) * g;
+        }
+        peak = Math.max(peak, Math.abs(y));
+      }
+    }
+    const scale = Math.max(0.0002, Math.min(1, cfg.volume)) / (peak || 1);
+    levelCache.set(key, { attack: inst.attack, partials: inst.partials.map(([r, a, d]) => [r, a * scale, d]) });
+  }
+  return levelCache.get(key);
+}
 
 // Schedules one play of the tune on a Web Audio context, starting at `at` (audio-clock seconds).
+// The Android player (native/android/TuneSynth.java) draws the exact same shape.
 export function scheduleTune(ctx, dest, at, rand = Math.random, oscs, cfg = ALARM) {
   const notes = buildTune(rand, cfg);
-  const peak = Math.max(0.0002, Math.min(1, cfg.volume));
+  const { attack, partials } = instrumentPartials(cfg);
   for (const n of notes) {
-    const t0 = at + n.start, rel = Math.min(ENVELOPE.release, n.dur * 0.3);
-    const g = ctx.createGain();
-    const bright = Math.max(0, cfg.brightness || 0);
-    const layers = bright ? [[n.freq, 1 / (1 + bright)], [n.freq * 2, bright / (1 + bright)]] : [[n.freq, 1]];
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(peak, t0 + ENVELOPE.attack);
-    g.gain.exponentialRampToValueAtTime(peak * Math.exp(-ENVELOPE.ring * (n.dur - rel)), t0 + n.dur - rel);
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.dur);
-    g.connect(dest);
-    for (const [freq, level] of layers) {
-      const o = ctx.createOscillator(), lv = ctx.createGain();
-      o.type = 'sine'; o.frequency.value = freq; lv.gain.value = level;
-      o.connect(lv).connect(g);
+    const t0 = at + n.start, rel = Math.min(ENVELOPE.release, n.dur * 0.3), end = n.dur - rel;
+    for (const [r, amp, fade] of partials) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = n.freq * r;
+      g.gain.setValueAtTime(LOW, t0);
+      g.gain.exponentialRampToValueAtTime(amp, t0 + attack);                                  // strike
+      g.gain.exponentialRampToValueAtTime(Math.max(LOW * 2, amp * Math.exp(-fade * (end - attack))), t0 + end); // ring
+      g.gain.exponentialRampToValueAtTime(LOW, t0 + n.dur);                                   // release
+      o.connect(g).connect(dest);
       o.start(t0); o.stop(t0 + n.dur + 0.005);
       if (oscs) { oscs.add(o); o.onended = () => oscs.delete(o); }
     }
@@ -239,7 +267,8 @@ function nativeTick(nat) {
     // Each play gets its own random "?" note; the plugin just plays what it is given
     const count = Math.max(1, Math.ceil(ALARM.maxRingSeconds / len));
     const plays = Array.from({ length: count }, () => buildTune().map((n) => ({ f: n.freq, s: n.start, d: n.dur })));
-    Promise.resolve(nat.play({ plays, playSeconds: len, peak: ALARM.volume, brightness: ALARM.brightness || 0, attack: ENVELOPE.attack, release: ENVELOPE.release, ring: ENVELOPE.ring }))
+    const { attack, partials } = instrumentPartials();
+    Promise.resolve(nat.play({ plays, playSeconds: len, partials, attack, release: ENVELOPE.release }))
       .catch(() => { nativeBroken = true; alarm = null; }); // fall back to Web Audio
     return true;
   }

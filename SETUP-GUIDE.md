@@ -138,7 +138,8 @@ minute, or until you tap Dismiss.
 
 **Tweaking it:** all the alarm settings are in one block at the top of
 `www/js/native.js` (look for `ALARM SETTINGS`): slot length, an extra pause
-between repeats, how long it rings, volume, and brightness. The notes themselves
+between repeats, how long it rings, volume, and the instrument
+(`musicBox` is the default; also `chime`, `softOrgan`, or `pure`). The notes themselves
 are listed right below it, one line per slot. You can edit that file directly on
 GitHub (open it, click the pencil, change a number, commit); the new APK builds
 automatically. If a build ever shows a yellow warning

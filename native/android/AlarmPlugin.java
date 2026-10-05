@@ -36,16 +36,23 @@ public class AlarmPlugin extends Plugin {
             return;
         }
         final double seconds = call.getDouble("playSeconds", 5.0);
-        final double peak = call.getDouble("peak", 0.95);
-        final double brightness = call.getDouble("brightness", 0.0);
-        final double attack = call.getDouble("attack", 0.012);
+        final double attack = call.getDouble("attack", 0.01);
         final double release = call.getDouble("release", 0.03);
-        final double ring = call.getDouble("ring", 1.14);
+        JSArray parts = call.getArray("partials");
+        if (parts == null || parts.length() == 0) {
+            call.reject("No instrument given");
+            return;
+        }
         if (!(seconds > 0.5 && seconds < 60)) {
             call.reject("Bad play length");
             return;
         }
         try {
+            final double[][] partials = new double[parts.length()][];
+            for (int k = 0; k < partials.length; k++) {
+                JSONArray q = parts.getJSONArray(k);
+                partials[k] = new double[] { q.getDouble(0), q.getDouble(1), q.getDouble(2) };
+            }
             final Play[] list = new Play[plays.length()];
             for (int p = 0; p < list.length; p++) {
                 JSONArray notes = plays.getJSONArray(p);
@@ -61,7 +68,7 @@ public class AlarmPlugin extends Plugin {
                 }
                 list[p] = pl;
             }
-            start(list, seconds, peak, brightness, attack, release, ring);
+            start(list, seconds, partials, attack, release);
             call.resolve();
         } catch (Exception e) {
             call.reject("Could not start the alarm: " + e.getMessage());
@@ -79,8 +86,8 @@ public class AlarmPlugin extends Plugin {
         halt();
     }
 
-    private void start(final Play[] list, final double seconds, final double peak, final double brightness,
-                       final double attack, final double release, final double ring) {
+    private void start(final Play[] list, final double seconds, final double[][] partials,
+                       final double attack, final double release) {
         halt();
         int min = AudioTrack.getMinBufferSize(
                 TuneSynth.RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
@@ -108,7 +115,7 @@ public class AlarmPlugin extends Plugin {
                     t.play();
                     for (Play p : list) {
                         if (!running || track != t) break;
-                        short[] pcm = TuneSynth.render(p.f, p.s, p.d, seconds, peak, brightness, attack, release, ring);
+                        short[] pcm = TuneSynth.render(p.f, p.s, p.d, seconds, partials, attack, release);
                         int off = 0;
                         while (running && track == t && off < pcm.length) {
                             int n = t.write(pcm, off, Math.min(4096, pcm.length - off));
